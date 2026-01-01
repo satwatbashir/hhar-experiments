@@ -390,8 +390,11 @@ def evaluate_and_log_central_dataset(round_num: int, parameters, config,
 
     # 3) Build model & load global params
     net = Net(in_ch=in_ch, seq_len=T, num_classes=n_classes)
-    # Convert Flower Parameters to NDArrays before setting weights
-    nds = parameters_to_ndarrays(parameters)
+    # Handle both Parameters object and raw list of ndarrays
+    if isinstance(parameters, list):
+        nds = parameters
+    else:
+        nds = parameters_to_ndarrays(parameters)
     set_weights(net, nds)
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
