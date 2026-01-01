@@ -1,0 +1,91 @@
+# ============================================
+# HHAR Federated Learning Experiments
+# .gitignore - Exclude large/generated files
+# ============================================
+
+# ============ DATA FOLDERS ============
+# HHAR sensor data (~4GB per method)
+hhar/
+*/hhar/
+**/hhar/
+
+# Preprocessed cache files
+**/data/hhar_cache/
+*.npz
+users.json
+
+# ============ PYTHON ============
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env/
+
+# ============ GENERATED FILES ============
+# Model checkpoints
+*.pt
+*.pth
+*.pkl
+*.pickle
+*.ckpt
+
+# Metrics and logs
+metrics/
+*/metrics/
+**/metrics/
+*.log
+*.csv
+
+# Training outputs
+rounds/
+*/rounds/
+**/rounds/
+models/
+*/models/
+**/models/
+clusters/
+*/clusters/
+**/clusters/
+
+# Run logs and outputs
+runs/
+**/runs/
+logs/
+**/logs/
+*.err
+*.out
+
+# Signal files
+signals/
+**/signals/
+*.signal
+
+# Archived/old experiments
+archived/
+*/archived/
+**/archived/
+
+# ============ IDE ============
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ============ OS ============
+.DS_Store
+Thumbs.db
+
+# ============ MISC ============
+*.bak
+*.tmp
+*.temp

@@ -1,0 +1,50 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fedprox"
+version = "1.0.0"
+description = "FedProx Federated Learning with Flower"
+license = "Apache-2.0"
+dependencies = [
+    "flwr[simulation]>=1.12.0,<2.0",
+    "torch>=2.2.1,<3.0",
+    "pandas>=2.0.0,<3.0",
+    "numpy>=1.24.0,<2.0",
+    "scipy>=1.10.0,<2.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[tool.flwr.app]
+publisher = "flwrlabs"
+
+[tool.flwr.app.components]
+serverapp = "fedge.server_app:app"
+clientapp = "fedge.client_app:app"
+
+[tool.flwr.app.config]
+num-server-rounds = 100
+fraction-fit = 1.0
+local-epochs = 5
+batch_size = 32
+proximal_mu = 0.01
+num-partitions = 9
+partition-by = "user"
+data-root = "hhar/Activity recognition exp"
+use-watches = true
+sample-rate-hz = 50
+window-seconds = 2
+window-stride-seconds = 1
+num-classes = 6
+model = "cnn1d"
+
+[tool.flwr.federations]
+default = "local-simulation"
+
+[tool.flwr.federations.local-simulation]
+options.num-supernodes = 9
+options.ray_init_args.local_mode = true
+options.ray_init_args.ignore_reinit_error = true

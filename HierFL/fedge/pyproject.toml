@@ -1,0 +1,64 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fedge"
+version = "1.0.0"
+description = ""
+license = "Apache-2.0"
+dependencies = [
+    "flwr[simulation]>=1.18.0",
+    "flwr-datasets[vision]>=0.5.0",
+    "torch==2.5.1",
+    "pandas>=1.5.0",
+    "numpy>=1.21.0",
+    "requests>=2.28.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[tool.flwr.app]
+publisher = "satwat"
+
+[tool.flwr.app.components]
+serverapp = "fedge.server_app:app"
+clientapp = "fedge.client_app:app"
+
+[tool.flwr.app.config]
+# Federated control
+num-server-rounds = 2
+fraction-fit = 1.0
+local-epochs = 5
+batch_size = 32
+min_available_clients = 9
+
+# Partitions/clients
+num-partitions = 9
+partition-by = "user"
+
+# HHAR Dataset Configuration
+data-root = "hhar/Activity recognition exp"
+use-watches = true
+sample-rate-hz = 50
+window-seconds = 2
+window-stride-seconds = 1
+num-classes = 6
+model = "cnn1d"
+
+[tool.flwr.federations]
+default = "local-simulation"
+
+[tool.flwr.federations.local-simulation]
+options.num-supernodes = 9
+client-resources.num_cpus = 1
+
+[tool.flwr.hierarchy]
+num_servers = 3
+clients_per_server = [3,3,3]
+global_rounds = 100
+server_rounds_per_global = 1
+cloud_port = 6000
+alpha_server = 1.0
+alpha_client = 0.5
