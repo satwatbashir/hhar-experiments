@@ -27,6 +27,9 @@ serverapp = "fedge.server_app:app"
 clientapp = "fedge.client_app:app"
 
 [tool.flwr.app.config]
+# Reproducibility
+seed = 42  # Change to 43, 44 for seeds 2, 3
+
 # Federated control
 num-server-rounds = 2
 fraction-fit = 1.0

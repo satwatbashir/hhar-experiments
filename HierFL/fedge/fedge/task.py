@@ -29,6 +29,17 @@ WINDOW_SECONDS = app_config.get("window-seconds", 2)
 WINDOW_STRIDE_SECONDS = app_config.get("window-stride-seconds", 1)
 NUM_CLASSES = app_config.get("num-classes", 6)
 
+# Global seed for reproducibility (read from config, default 42)
+GLOBAL_SEED = app_config.get("seed", 42)
+
+# Set global seeds for reproducibility
+import random
+random.seed(GLOBAL_SEED)
+np.random.seed(GLOBAL_SEED)
+torch.manual_seed(GLOBAL_SEED)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(GLOBAL_SEED)
+
 # ───────────────────────── HHAR Data Processing ──────────────────────────
 
 # Activity labels in order (align with Scaffold)
@@ -493,7 +504,7 @@ def load_data(
     n_train = int(0.8 * n_client_samples)
     
     # Shuffle indices for random train/test split
-    np.random.seed(42 + partition_id)  # Deterministic but different per client
+    np.random.seed(GLOBAL_SEED + partition_id)  # Deterministic but different per client
     shuffled_indices = np.random.permutation(client_indices)
     
     train_indices = shuffled_indices[:n_train]
