@@ -21,6 +21,7 @@ class FlowerClient(NumPyClient):
         local_epochs: int,
         local_lr: float = 0.05,
         client_id: int = 0,
+        seed: int = 42,
     ):
         super().__init__()
         self.net = net
@@ -32,14 +33,14 @@ class FlowerClient(NumPyClient):
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.net.to(self.device)
-        
+
         # Loss function
         self.criterion = nn.CrossEntropyLoss()
-        
-        # Randomness control for reproducibility
-        torch.manual_seed(42 + client_id)
-        np.random.seed(42 + client_id)
-        
+
+        # Randomness control for reproducibility (seed from config)
+        torch.manual_seed(seed + client_id)
+        np.random.seed(seed + client_id)
+
         # Store global model parameters for proximal term
         self.global_params = None
 
@@ -190,7 +191,8 @@ def client_fn(context):
         trainloader,
         valloader,
         local_epochs=context.run_config["local-epochs"],
-        client_id=pid,  # For reproducibility
+        client_id=pid,
+        seed=context.run_config.get("seed", 42),  # Read seed from config
     ).to_client()
 
 app = ClientApp(client_fn)
