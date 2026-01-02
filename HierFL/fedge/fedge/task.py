@@ -29,16 +29,18 @@ WINDOW_SECONDS = app_config.get("window-seconds", 2)
 WINDOW_STRIDE_SECONDS = app_config.get("window-stride-seconds", 1)
 NUM_CLASSES = app_config.get("num-classes", 6)
 
-# Global seed for reproducibility (read from config, default 42)
-GLOBAL_SEED = app_config.get("seed", 42)
+# Global seed for reproducibility
+# Priority: ENV variable SEED > config file > default (42)
+import random
+GLOBAL_SEED = int(os.environ.get("SEED", app_config.get("seed", 42)))
 
 # Set global seeds for reproducibility
-import random
 random.seed(GLOBAL_SEED)
 np.random.seed(GLOBAL_SEED)
 torch.manual_seed(GLOBAL_SEED)
 if torch.cuda.is_available():
     torch.cuda.manual_seed_all(GLOBAL_SEED)
+print(f"[SEED] Using seed: {GLOBAL_SEED}")
 
 # ───────────────────────── HHAR Data Processing ──────────────────────────
 

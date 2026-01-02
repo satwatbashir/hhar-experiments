@@ -1,4 +1,5 @@
 # client_app.py
+import os
 import numpy as np
 import torch
 import torch.nn as nn
@@ -186,13 +187,15 @@ def client_fn(context):
     net = Net(in_ch=c, seq_len=t, num_classes=n_classes)
 
     # 2) Return NumPyClient
+    # Priority: ENV variable SEED > config file > default (42)
+    seed = int(os.environ.get("SEED", context.run_config.get("seed", 42)))
     return FlowerClient(
         net,
         trainloader,
         valloader,
         local_epochs=context.run_config["local-epochs"],
         client_id=pid,
-        seed=context.run_config.get("seed", 42),  # Read seed from config
+        seed=seed,
     ).to_client()
 
 app = ClientApp(client_fn)
