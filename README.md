@@ -110,6 +110,47 @@ Each method generates metrics in the `metrics/` folder:
 - Communication costs (bytes up/down)
 - Computation time
 
+## Saving and Downloading Results
+
+### FedProx
+```bash
+cd ~/hhar/fedprox
+mkdir -p results_seed1
+mv metrics results_seed1/
+zip -r fedprox_seed1.zip results_seed1/
+```
+Download path: `/home/satwatbashir/hhar/fedprox/fedprox_seed1.zip`
+
+### HierFL / Fedge
+```bash
+cd ~/hhar/HierFL/fedge  # or ~/hhar/Fedge-100/fedge
+mkdir -p results_seed1/metrics/cloud
+mkdir -p results_seed1/metrics/leaf/server_0
+mkdir -p results_seed1/metrics/leaf/server_1
+mkdir -p results_seed1/metrics/leaf/server_2
+
+# Copy cloud metrics
+cp metrics/cloud/rounds.csv results_seed1/metrics/cloud/
+
+# Copy leaf server metrics
+cp -r rounds/leaf/server_0/metrics/* results_seed1/metrics/leaf/server_0/
+cp -r rounds/leaf/server_1/metrics/* results_seed1/metrics/leaf/server_1/
+cp -r rounds/leaf/server_2/metrics/* results_seed1/metrics/leaf/server_2/
+
+# Zip
+zip -r hierfl_seed1.zip results_seed1/
+```
+Download path: `/home/satwatbashir/hhar/HierFL/fedge/hierfl_seed1.zip`
+
+### Cleanup before next run
+```bash
+# FedProx
+rm -rf metrics
+
+# HierFL / Fedge
+rm -rf rounds runs signals metrics
+```
+
 ## Reproducibility
 
 All experiments support multiple seeds via environment variable:
