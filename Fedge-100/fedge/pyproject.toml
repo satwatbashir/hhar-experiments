@@ -74,6 +74,9 @@ window-stride-seconds = 1
 num-classes = 6
 model = "cnn1d"
 
+# Reproducibility
+seed = 42  # Override with SEED env variable: SEED=43 python3 orchestrator.py
+
 
 # Cloud Clustering Configuration
 [tool.flwr.cloud_cluster]

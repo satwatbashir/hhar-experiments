@@ -38,6 +38,19 @@ WINDOW_SECONDS = int(_app_cfg.get("window-seconds", 2))
 WINDOW_STRIDE_SECONDS = int(_app_cfg.get("window-stride-seconds", 1))
 NUM_CLASSES = int(_app_cfg.get("num-classes", 6))
 
+# Global seed for reproducibility
+# Priority: ENV variable SEED > config file > default (42)
+import random
+GLOBAL_SEED = int(os.environ.get("SEED", _app_cfg.get("seed", 42)))
+
+# Set global seeds for reproducibility
+random.seed(GLOBAL_SEED)
+np.random.seed(GLOBAL_SEED)
+torch.manual_seed(GLOBAL_SEED)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(GLOBAL_SEED)
+print(f"[SEED] Using seed: {GLOBAL_SEED}")
+
 # ------------------------------ HHAR dataset ------------------------------
 def ensure_hhar_dataset(data_root: str = DATA_ROOT, use_watches: bool = USE_WATCHES) -> None:
     root_path = Path(data_root)
@@ -464,7 +477,7 @@ def load_data(
     # Split client data into train/test (80/20)
     n_client = len(client_idx)
     n_train = int(0.8 * n_client)
-    np.random.seed(42 + (server_id or 0) * 100 + partition_id)
+    np.random.seed(GLOBAL_SEED + (server_id or 0) * 100 + partition_id)
     shuffled = np.random.permutation(client_idx)
     train_idx = shuffled[:n_train]
     test_idx  = shuffled[n_train:]

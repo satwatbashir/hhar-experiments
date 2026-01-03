@@ -156,6 +156,7 @@ def _create_partitions_if_needed() -> None:
         users_all,
         NUM_SERVERS,
         CLIENTS_PER_SERVER_LIST,
+        seed=GLOBAL_SEED,
     )
     
     # Log partition statistics for each server (simplified)
@@ -207,6 +208,11 @@ else:
 GLOBAL_ROUNDS: int = int(HIER["global_rounds"])  # No environment override
 SERVER_ROUNDS_PER_GLOBAL: int = HIER["server_rounds_per_global"]
 CLOUD_PORT: int = HIER["cloud_port"]
+
+# Seed for reproducibility - Priority: ENV variable SEED > config file > default (42)
+_flwr_app_cfg = _load_config().get("tool", {}).get("flwr", {}).get("app", {}).get("config", {})
+GLOBAL_SEED: int = int(os.environ.get("SEED", _flwr_app_cfg.get("seed", 42)))
+logger.info(f"[SEED] Using seed: {GLOBAL_SEED}")
 
 # Dataset strategy - require explicit TOML value
 if "dataset_flag" not in HIER:
