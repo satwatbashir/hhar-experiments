@@ -111,11 +111,12 @@ def _load_config() -> Dict:
 def _create_partitions_if_needed() -> None:
     """Create hierarchical partitions using the working partitioning.py system."""
     rounds_dir = PROJECT_ROOT / "rounds"
-    parts_json = rounds_dir / "partitions.json"
-    
+    # Include seed in partition filename to ensure different seeds get different partitions
+    parts_json = rounds_dir / f"partitions_seed{GLOBAL_SEED}.json"
+
     if parts_json.exists():
-        os.environ["PARTITIONS_JSON"] = str(parts_json)   # ← add this
-        logger.info(f"✅ Using existing partitions: {parts_json}")
+        os.environ["PARTITIONS_JSON"] = str(parts_json)
+        logger.info(f"✅ Using existing partitions for seed {GLOBAL_SEED}: {parts_json}")
         # Log partition summary
         try:
             import json
@@ -212,6 +213,7 @@ CLOUD_PORT: int = HIER["cloud_port"]
 # Seed for reproducibility - Priority: ENV variable SEED > config file > default (42)
 _flwr_app_cfg = _load_config().get("tool", {}).get("flwr", {}).get("app", {}).get("config", {})
 GLOBAL_SEED: int = int(os.environ.get("SEED", _flwr_app_cfg.get("seed", 42)))
+os.environ["SEED"] = str(GLOBAL_SEED)  # Propagate to child processes
 logger.info(f"[SEED] Using seed: {GLOBAL_SEED}")
 
 # Dataset strategy - require explicit TOML value

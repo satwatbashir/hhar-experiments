@@ -305,7 +305,7 @@ class CloudFedAvg(FedAvg):
                     logger.info(f"[Cloud] Cluster assignments: {cluster_map}")
                     
                     # Gate artifact writes with environment flag
-                    write_artifacts = bool(os.getenv("CLOUD_WRITE_ARTIFACTS", "0") == "1")
+                    write_artifacts = bool(os.getenv("CLOUD_WRITE_ARTIFACTS", "1") == "1")
                     
                     # Define cluster directory for artifact writes
                     cl_dir = Path().resolve() / "clusters"
