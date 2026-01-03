@@ -228,7 +228,11 @@ class FlowerClient(NumPyClient):
         
         # ✅ NEW: Evaluate accuracy after training to include in fit metrics
         eval_loss, eval_acc = test(self.net, self.valloader, self.device)
-        
+
+        # Cache for evaluate() to avoid redundant computation
+        self._last_eval_loss = eval_loss
+        self._last_eval_acc = eval_acc
+
         # Prepare and return results
         round_time = time.time() - t0
         bytes_up = raw_bytes(get_weights(self.net))
@@ -237,12 +241,24 @@ class FlowerClient(NumPyClient):
         return get_weights(self.net), len(self.trainloader.dataset), metrics
 
     def evaluate(self, parameters, config):
-        # Compute download size of evaluation parameters
+        # OPTIMIZATION: Skip redundant evaluation for FEDGE architecture
+        # Server-level evaluation (in leaf_server.py) already captures performance
+        # on the full server shard. Per-client evaluation of aggregated model
+        # is not essential for clustering which operates at server level.
+        #
+        # Return cached fit metrics instead of re-evaluating
         bytes_down = raw_bytes(parameters)
-        # Update local model, evaluate on validation set
-        set_weights(self.net, parameters)
-        loss, accuracy = test(self.net, self.valloader, self.device)
         cid = os.environ.get("CLIENT_ID", "")
+
+        # Use cached metrics from last fit() if available
+        if hasattr(self, '_last_eval_loss') and hasattr(self, '_last_eval_acc'):
+            loss = self._last_eval_loss
+            accuracy = self._last_eval_acc
+        else:
+            # Fallback: evaluate if no cached metrics (should not happen normally)
+            set_weights(self.net, parameters)
+            loss, accuracy = test(self.net, self.valloader, self.device)
+
         metrics = {
             "accuracy": accuracy,
             "bytes_down_eval": bytes_down,

@@ -31,7 +31,7 @@ from flwr.common.typing import Metrics, FitRes, EvaluateRes, Scalar
 from flwr.server.client_manager import ClientManager
 from flwr.server.client_proxy import ClientProxy
 
-from fedge.task import Net, get_weights, set_weights, load_data, test, get_eval_loader
+from fedge.task import Net, get_weights, set_weights, load_data, test
 
 # Fix Windows encoding issues
 if sys.platform == "win32":
@@ -339,6 +339,11 @@ class LeafFedAvg(FedAvg):
         return new_global, metrics
 
     def _write_fit_metrics_csv(self, rnd: int, results: List[Tuple[int, Any]]):
+        # OPTIMIZATION: Skip client-level metrics for FEDGE (only server-level matters)
+        # Set SKIP_CLIENT_METRICS=1 to disable per-client CSV writing
+        if os.environ.get("SKIP_CLIENT_METRICS", "1") == "1":
+            return  # Skip client metrics collection entirely
+
         # Save per-client fit metrics into per-round/per-server metrics folder for symmetry
         local_rnd = rnd - 1
         metrics_dir = self.base_dir / "metrics"
@@ -415,6 +420,11 @@ class LeafFedAvg(FedAvg):
 
     def _write_eval_metrics_csv(self, rnd: int, results: List[Tuple[int, Any]]):
         """Save per-client evaluation loss & accuracy for this round"""
+        # OPTIMIZATION: Skip client-level metrics for FEDGE (only server-level matters)
+        # Set SKIP_CLIENT_METRICS=1 to disable per-client CSV writing
+        if os.environ.get("SKIP_CLIENT_METRICS", "1") == "1":
+            return  # Skip client metrics collection entirely
+
         local_rnd = rnd - 1
         metrics_dir = self.base_dir / "metrics"
         metrics_dir.mkdir(exist_ok=True)
@@ -704,7 +714,7 @@ class LeafFedAvg(FedAvg):
         self.prev_avg_client_loss = agg_loss
         self.prev_avg_client_acc = agg_acc
 
-        # Load HHAR data for centralized evaluation on full *global* test set
+        # FEDGE: Evaluate on server-local data only (NO global test set)
         local_rnd = rnd - 1
         model = Net()
         if hasattr(self, "latest_parameters") and self.latest_parameters is not None:
@@ -712,16 +722,33 @@ class LeafFedAvg(FedAvg):
             set_weights(model, nds)
         dev = torch.device("cpu")
 
-        # 3-a Global test set evaluation removed: enforce server-local-only evaluation
-        batch_size = getattr(self, 'eval_batch_size', 20)  # From TOML config
-
-        # 3-b Local-centralised test set (union of this server's clients)
+        # FEDGE: Server-local evaluation using union of this server's clients' validation data
         # Use prebuilt server-local validation loader to avoid per-round reloading
         try:
             local_loss, local_acc = test(model, self._valloader_gate, dev)
         except Exception as e:
             logger.error(f"[{self.server_str}] Error during server-local evaluation: {e}")
             local_loss, local_acc = None, None
+
+        # OPTIMIZATION: Cache evaluation metrics for proxy to avoid redundant computation
+        try:
+            import json
+            from fedge.utils.fs_optimized import get_model_path
+            model_path = get_model_path(self.project_root, self.server_id, self.global_round)
+            metrics_path = model_path.with_suffix('.metrics.json')
+            total_samples = len(self._valloader_gate.dataset) if hasattr(self._valloader_gate, 'dataset') else 0
+            cached_metrics = {
+                "loss": local_loss if local_loss is not None else float('nan'),
+                "accuracy": local_acc if local_acc is not None else 0.0,
+                "num_examples": total_samples,
+                "server_id": self.server_id,
+                "global_round": self.global_round
+            }
+            with open(metrics_path, 'w') as f:
+                json.dump(cached_metrics, f)
+            logger.info(f"[{self.server_str}] Cached evaluation metrics to {metrics_path}")
+        except Exception as e:
+            logger.warning(f"[{self.server_str}] Failed to cache evaluation metrics: {e}")
 
         # 4) Compute gaps and statistical metrics (server-local only)
         gap_local_loss = local_loss - (agg_loss or 0.0) if local_loss is not None else None
@@ -754,16 +781,10 @@ class LeafFedAvg(FedAvg):
             acc_ci = stats.t.interval(0.95, len(client_accs)-1, loc=acc_mean, scale=acc_sem)
             acc_ci_lower, acc_ci_upper = acc_ci
 
-        # 5) Create metrics folder and write server-side metrics CSV
-        metrics_dir = self.base_dir / "metrics"
-        metrics_dir.mkdir(exist_ok=True)
-        # Legacy per-server server_metrics.csv suppressed; using standardized servers/rounds.csv only
-        logger.info(f"[{self.server_str} | Round {local_rnd}] Recorded server aggregate metrics → standardized servers/rounds.csv")
+        # 5) Write per-server metrics CSV (one file per server - no combined file)
+        # Path: rounds/leaf/server_{sid}/metrics/servers/rounds.csv
+        logger.info(f"[{self.server_str} | Round {local_rnd}] Recording server metrics → per-server rounds.csv")
 
-        # Standardized server-level rounds.csv (metrics/servers/rounds.csv)
-        std_servers_dir = metrics_dir / "servers"
-        std_servers_dir.mkdir(parents=True, exist_ok=True)
-        std_rounds_csv = std_servers_dir / "rounds.csv"
         std_fields = [
             "global_round","local_round","server_id",
             "client_test_loss_mean","client_test_accuracy_mean",
@@ -774,36 +795,6 @@ class LeafFedAvg(FedAvg):
             "conv_loss_delta","conv_acc_delta",
             "bytes_up_total","bytes_down_total","comp_time_sec_mean","round_time_sec",
         ]
-        std_write_header = not std_rounds_csv.exists()
-        with open(std_rounds_csv, "a", newline="") as f:
-            std_writer = csv.DictWriter(f, fieldnames=std_fields)
-            if std_write_header:
-                std_writer.writeheader()
-            std_writer.writerow({
-                "global_round": self.global_round,
-                "local_round": local_rnd,
-                "server_id": self.server_id,
-                "client_test_loss_mean": agg_loss,
-                "client_test_accuracy_mean": agg_acc,
-                "client_test_loss_std": loss_std,
-                "client_test_loss_ci95_low": loss_ci_lower,
-                "client_test_loss_ci95_high": loss_ci_upper,
-                "client_test_accuracy_std": acc_std,
-                "client_test_accuracy_ci95_low": acc_ci_lower,
-                "client_test_accuracy_ci95_high": acc_ci_upper,
-                "server_partition_test_loss": local_loss,
-                "server_partition_test_accuracy": local_acc,
-                "generalization_loss_gap": (local_loss - (agg_loss or 0.0)) if local_loss is not None and agg_loss is not None else "",
-                "generalization_accuracy_gap": (local_acc - (agg_acc or 0.0)) if local_acc is not None and agg_acc is not None else "",
-                "conv_loss_delta": delta_avg_client_loss if 'delta_avg_client_loss' in locals() else "",
-                "conv_acc_delta": delta_avg_client_acc if 'delta_avg_client_acc' in locals() else "",
-                "bytes_up_total": getattr(self, "server_bytes_up", 0),
-                "bytes_down_total": getattr(self, "server_bytes_down", 0),
-                "comp_time_sec_mean": getattr(self, "server_comp_time", 0.0),
-                "round_time_sec": getattr(self, "server_round_time", 0.0),
-            })
-
-        # NEW: Also write per-server standardized rounds.csv under rounds/leaf/server_{sid}/metrics/servers/rounds.csv
         per_srv_servers_dir = (
             Path().resolve()
             / "rounds" / "leaf" / f"server_{self.server_id}" / "metrics" / "servers"

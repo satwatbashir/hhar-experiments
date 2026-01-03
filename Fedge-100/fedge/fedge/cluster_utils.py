@@ -16,7 +16,7 @@ import torch.nn.functional as F
 from collections import defaultdict
 # Removed sklearn.cluster import - using pure similarity clustering
 
-from fedge.task import Net, get_eval_loader, set_weights  # type: ignore
+from fedge.task import Net, set_weights  # type: ignore
 
 # -----------------------------------------------------------------------------
 # Configuration: Load batch sizes from pyproject.toml (strict, no fallbacks)

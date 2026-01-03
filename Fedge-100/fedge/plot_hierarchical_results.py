@@ -33,52 +33,54 @@ class HierarchicalResultsAnalyzer:
     def _load_data(self):
         """Load server and cloud metrics from correct locations"""
         print("📊 Loading hierarchical FL metrics...")
-        
-        # Load server metrics from consolidated CSV: metrics/servers/rounds.csv
-        servers_dir = self.metrics_dir / "servers"
-        servers_rounds_csv = servers_dir / "rounds.csv"
-        if servers_rounds_csv.exists():
-            try:
-                df_all = pd.read_csv(servers_rounds_csv)
-                # Split by server_id
-                for sid in sorted(df_all["server_id"].unique()):
-                    df_sid = (
-                        df_all[df_all["server_id"] == sid]
-                        .sort_values("global_round")
-                        .reset_index(drop=True)
-                    )
-                    self.server_data[int(sid)] = df_sid
-                    print(f"✅ Loaded {len(df_sid)} rows for Server {sid} from servers/rounds.csv")
 
-                # Compute cluster metrics across servers per round
-                acc_col = next((c for c in [
-                    'server_partition_test_accuracy',
-                    'client_test_accuracy_mean',
-                    'agg_acc'
-                ] if c in df_all.columns), None)
-                loss_col = next((c for c in [
-                    'server_partition_test_loss',
-                    'client_test_loss_mean',
-                    'agg_loss'
-                ] if c in df_all.columns), None)
-                if acc_col and loss_col:
-                    g = df_all.groupby('global_round')
-                    cluster_df = pd.DataFrame({
-                        'global_round': g.size().index.values,
-                        'cluster_accuracy_mean': g[acc_col].mean().values,
-                        'cluster_accuracy_std': g[acc_col].std().fillna(0.0).values,
-                        'cluster_loss_mean': g[loss_col].mean().values,
-                        'cluster_loss_std': g[loss_col].std().fillna(0.0).values,
-                        'num_clusters': g['server_id'].nunique().values,
-                    })
-                    self.cloud_data = cluster_df.sort_values('global_round').reset_index(drop=True)
-                    print(f"✅ Computed cluster metrics from servers: {len(self.cloud_data)} rounds, {int(self.cloud_data['num_clusters'].max())} clusters")
-                else:
-                    print("⚠️ Could not compute cluster metrics (missing accuracy/loss columns)")
-            except Exception as e:
-                print(f"⚠️ Error loading servers/rounds.csv: {e}")
+        # Load server metrics from per-server files: rounds/leaf/server_{sid}/metrics/servers/rounds.csv
+        rounds_dir = Path("./rounds/leaf")
+        server_dfs = []
+
+        if rounds_dir.exists():
+            for server_dir in sorted(rounds_dir.glob("server_*")):
+                try:
+                    sid = int(server_dir.name.split("_")[1])
+                    csv_path = server_dir / "metrics" / "servers" / "rounds.csv"
+                    if csv_path.exists():
+                        df = pd.read_csv(csv_path)
+                        df = df.sort_values("global_round").reset_index(drop=True)
+                        self.server_data[sid] = df
+                        server_dfs.append(df)
+                        print(f"✅ Loaded {len(df)} rows for Server {sid}")
+                except Exception as e:
+                    print(f"⚠️ Error loading server {server_dir.name}: {e}")
+
+        # Compute cluster metrics from combined server data
+        if server_dfs:
+            df_all = pd.concat(server_dfs, ignore_index=True)
+            acc_col = next((c for c in [
+                'server_partition_test_accuracy',
+                'client_test_accuracy_mean',
+                'agg_acc'
+            ] if c in df_all.columns), None)
+            loss_col = next((c for c in [
+                'server_partition_test_loss',
+                'client_test_loss_mean',
+                'agg_loss'
+            ] if c in df_all.columns), None)
+            if acc_col and loss_col:
+                g = df_all.groupby('global_round')
+                cluster_df = pd.DataFrame({
+                    'global_round': g.size().index.values,
+                    'cluster_accuracy_mean': g[acc_col].mean().values,
+                    'cluster_accuracy_std': g[acc_col].std().fillna(0.0).values,
+                    'cluster_loss_mean': g[loss_col].mean().values,
+                    'cluster_loss_std': g[loss_col].std().fillna(0.0).values,
+                    'num_clusters': g['server_id'].nunique().values,
+                })
+                self.cloud_data = cluster_df.sort_values('global_round').reset_index(drop=True)
+                print(f"✅ Computed cluster metrics: {len(self.cloud_data)} rounds, {int(self.cloud_data['num_clusters'].max())} servers")
+            else:
+                print("⚠️ Could not compute cluster metrics (missing accuracy/loss columns)")
         else:
-            print(f"⚠️ Server metrics not found at {servers_rounds_csv}")
+            print(f"⚠️ No server metrics found in {rounds_dir}")
         
         # Load cloud metrics from metrics/global_metrics.csv (Fedge-100 format) as a fallback
         global_metrics_csv = self.metrics_dir / "global_metrics.csv"

@@ -34,7 +34,7 @@ import numpy as np
 import argparse
 
 from flwr.server import start_server, ServerConfig
-from flwr.common import Metrics, Parameters, NDArrays
+from flwr.common import Metrics, Parameters, NDArrays, FitIns
 from flwr.common import parameters_to_ndarrays, ndarrays_to_parameters
 from flwr.server.strategy import FedAvg
 from fedge.task import Net, load_data, set_weights, test, get_weights
@@ -89,9 +89,10 @@ class CloudFedAvg(FedAvg):
         self._cluster_log_data = []
         self._cluster_assignments = {}
         self._reference_set = None
+        # FEDGE: Server to cluster params mapping for distribution
+        self._server_to_cluster_params_map: Dict[int, Parameters] = {}
+        self._latest_cluster_map: Dict[int, int] = {}  # server_id -> cluster_id
         # Convergence trackers (previous round values)
-        self._prev_central_loss: float | None = None
-        self._prev_central_acc: float | None = None
         self._prev_avg_srv_loss: float | None = None
         self._prev_avg_srv_acc: float | None = None
         
@@ -112,7 +113,61 @@ class CloudFedAvg(FedAvg):
         except Exception as exc:
             logger.error(f"[Cloud Server] Failed to get server_id from fit result: {exc}")
             return None
-    
+
+    def _get_server_id_from_client_proxy(self, client_proxy) -> Optional[int]:
+        """Extract server ID from client proxy's cid."""
+        try:
+            cid = str(client_proxy.cid)
+            # Common patterns: "server_0", "proxy_0", just "0", "s0", etc.
+            import re
+            match = re.search(r'(\d+)', cid)
+            if match:
+                return int(match.group(1))
+            return None
+        except Exception as exc:
+            logger.error(f"[Cloud Server] Failed to get server_id from client proxy: {exc}")
+            return None
+
+    def configure_fit(
+        self, server_round: int, parameters: Parameters, client_manager
+    ):
+        """
+        FEDGE CRITICAL: Override to distribute cluster-specific parameters.
+
+        Instead of sending the same aggregated params to all servers,
+        each server receives the model from its assigned cluster.
+        """
+        # Get base configuration from parent FedAvg
+        fit_configs = super().configure_fit(server_round, parameters, client_manager)
+
+        # Check if we have cluster params to distribute
+        if not self._server_to_cluster_params_map:
+            logger.info(f"[Cloud] configure_fit: No cluster params available (round {server_round}), using standard params")
+            return fit_configs
+
+        # FEDGE: Replace parameters with cluster-specific parameters for each server
+        updated_configs = []
+        for client_proxy, fit_ins in fit_configs:
+            server_id = self._get_server_id_from_client_proxy(client_proxy)
+
+            if server_id is not None and server_id in self._server_to_cluster_params_map:
+                # Replace with cluster-specific parameters
+                cluster_params = self._server_to_cluster_params_map[server_id]
+                cluster_id = self._latest_cluster_map.get(server_id, -1)
+
+                # Create new FitIns with cluster params but keep config
+                new_fit_ins = FitIns(parameters=cluster_params, config=fit_ins.config)
+
+                logger.info(f"[Cloud] FEDGE: Server {server_id} receives Cluster {cluster_id} params")
+                updated_configs.append((client_proxy, new_fit_ins))
+            else:
+                # Fallback: use aggregated params (should not happen after round 1)
+                logger.warning(f"[Cloud] FEDGE: Server {server_id} not in cluster map, using fallback params")
+                updated_configs.append((client_proxy, fit_ins))
+
+        logger.info(f"[Cloud] FEDGE configure_fit: Distributed cluster params to {len(updated_configs)} servers")
+        return updated_configs
+
     def aggregate_fit(self, server_round: int, results, failures):
         """Aggregate fit results; optionally perform cloud-tier clustering; save models."""
         # Use server_round directly (ignore GLOBAL_ROUND env var)
@@ -174,25 +229,10 @@ class CloudFedAvg(FedAvg):
             else:
                 logger.debug(f"[Cloud] Aggregated parameters validated - no NaN/inf detected")
 
-        # Always save the global model using rounds directory structure
-        if agg_list is not None:
-            # Use rounds directory structure as suggested
-            out_dir = Path().resolve() / "rounds" / f"round_{global_round}" / "global"
-            out_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Save as model.pkl in the global directory
-            model_path = out_dir / "model.pkl"
-            with open(model_path, "wb") as f:
-                pickle.dump(agg_list, f)
-            logger.info(f"[Cloud] Saved aggregated global model to {model_path}")
-            
-            # Also save in models/ directory for compatibility (single consistent name)
-            models_dir = Path().resolve() / "models"
-            models_dir.mkdir(parents=True, exist_ok=True)
-            legacy_path = models_dir / f"model_global_g{global_round}.pkl"
-            with open(legacy_path, "wb") as f:
-                pickle.dump(agg_list, f)
-            logger.info(f"[Cloud] Also saved to models directory: {legacy_path}")
+        # FEDGE: NO global model saving - only cluster models are used
+        # The global aggregation is only used as a fallback when clustering fails
+        # or for round 1 initialization
+        logger.info(f"[Cloud] FEDGE architecture: No global model saved (cluster-only distribution)")
 
         # 2) Cloud-tier clustering (weight-based) if enabled for this round
         should_cluster = (
@@ -316,38 +356,52 @@ class CloudFedAvg(FedAvg):
                     else:
                         logger.debug(f"[Cloud] Skipping artifact writes (CLOUD_WRITE_ARTIFACTS=0)")
                     
+                    # FEDGE CRITICAL: Clear previous cluster params and store new ones
+                    self._server_to_cluster_params_map.clear()
+                    self._latest_cluster_map = cluster_map.copy()
+
                     # Weighted average within cluster
                     for lab in unique_labels:
                         cluster_servers = [sid for sid, cluster_id in cluster_map.items() if cluster_id == lab]
                         if not cluster_servers:
                             continue
-                        
+
                         total_weight = sum(server_weights.get(sid, 1) for sid in cluster_servers)
                         sums = None
-                        
+
                         for sid in cluster_servers:
                             if sid in server_models:
                                 weight = server_weights.get(sid, 1) / total_weight
                                 model_arrays = server_models[sid]
-                                
+
                                 if sums is None:
                                     sums = [weight * arr for arr in model_arrays]
                                 else:
                                     for i, arr in enumerate(model_arrays):
                                         sums[i] += weight * arr
-                        
+
                         if sums is not None:
+                            # FEDGE CRITICAL: Convert to Parameters and store for distribution
+                            cluster_params = ndarrays_to_parameters(sums)
+
+                            # Map ALL servers in this cluster to receive this cluster's params
+                            for sid in cluster_servers:
+                                self._server_to_cluster_params_map[sid] = cluster_params
+                                logger.info(f"[Cloud] FEDGE: Server {sid} -> Cluster {lab} params stored for distribution")
+
                             # Save as plain list for evaluator compatibility
                             cluster_path = cl_dir / f"model_cluster{lab}_g{global_round}.pkl"
                             with open(cluster_path, "wb") as f:
                                 pickle.dump(sums, f, protocol=pickle.HIGHEST_PROTOCOL)
                             logger.info(f"[Cloud] Saved cluster {lab} model to {cluster_path}")
-                            
+
                             if write_artifacts:
                                 # Mirror to models/ directory
                                 models_dir = Path("models")
                                 models_dir.mkdir(exist_ok=True)
                                 shutil.copy2(cluster_path, models_dir / cluster_path.name)
+
+                    logger.info(f"[Cloud] FEDGE: Cluster params stored for {len(self._server_to_cluster_params_map)} servers")
 
                     logger.info(f"[Cloud] *** CLUSTERING COMPLETED *** @ global round {global_round}: K={len(unique_labels)} labels={cluster_map}")
                     
@@ -465,25 +519,8 @@ class CloudFedAvg(FedAvg):
                 loss_ci_lo, loss_ci_hi = _ci_pair(loss_mean, loss_std, int(srv_losses.size))
                 acc_ci_lo,  acc_ci_hi  = _ci_pair(acc_mean,  acc_std,  int(srv_accs.size))
 
-                # Centralized metrics from parent (loss) and parent_metrics['accuracy']
-                central_loss = float(loss) if loss is not None else float("nan")
-                central_acc  = float(parent_metrics.get("accuracy", 0.0))
-
-                # Generalization gaps (central vs avg across servers)
-                gen_gap_loss_central_minus_servers = (
-                    central_loss - loss_mean if _np.isfinite(central_loss) and _np.isfinite(loss_mean) else float("nan")
-                )
-                gen_gap_acc_central_minus_servers = (
-                    central_acc - acc_mean if _np.isfinite(central_acc) and _np.isfinite(acc_mean) else float("nan")
-                )
-
-                # Convergence deltas from previous round
-                delta_central_loss = (
-                    central_loss - self._prev_central_loss if (self._prev_central_loss is not None and _np.isfinite(central_loss)) else float("nan")
-                )
-                delta_central_acc = (
-                    central_acc - self._prev_central_acc if (self._prev_central_acc is not None and _np.isfinite(central_acc)) else float("nan")
-                )
+                # FEDGE: No central/global evaluation - only server-local metrics
+                # Convergence deltas from previous round (server averages only)
                 delta_avg_srv_loss = (
                     loss_mean - self._prev_avg_srv_loss if (self._prev_avg_srv_loss is not None and _np.isfinite(loss_mean)) else float("nan")
                 )
@@ -491,11 +528,9 @@ class CloudFedAvg(FedAvg):
                     acc_mean - self._prev_avg_srv_acc if (self._prev_avg_srv_acc is not None and _np.isfinite(acc_mean)) else float("nan")
                 )
 
-                # Update prev trackers
-                self._prev_central_loss = central_loss if _np.isfinite(central_loss) else None
-                self._prev_central_acc  = central_acc  if _np.isfinite(central_acc)  else None
-                self._prev_avg_srv_loss = loss_mean    if _np.isfinite(loss_mean)    else None
-                self._prev_avg_srv_acc  = acc_mean     if _np.isfinite(acc_mean)     else None
+                # Update prev trackers (server-level only)
+                self._prev_avg_srv_loss = loss_mean if _np.isfinite(loss_mean) else None
+                self._prev_avg_srv_acc  = acc_mean  if _np.isfinite(acc_mean)  else None
 
                 # Communication placeholders (no fine-grained accounting here)
                 bytes_up_total = 0
@@ -574,42 +609,12 @@ def run_server():
         cluster_config = config.get("tool", {}).get("flwr", {}).get("cluster", {})
         cloud_cluster_cfg = config.get("tool", {}).get("flwr", {}).get("cloud_cluster", {})
         
-        # CRITICAL FIX: Load previous round's model or create fresh parameters
+        # FEDGE: For round 1, use fresh model. For rounds > 1, cluster params
+        # are already stored from previous aggregate_fit() and distributed via configure_fit()
         global_round = int(os.getenv('GLOBAL_ROUND', '1'))
-        initial_parameters = None
-        # Initialize model upfront to avoid undefined variable
         init_model = Net()
-        
-        # Try to load previous round's global model
-        if global_round > 1:
-            prev_round = global_round - 1
-            candidate_paths = [
-                cwd / "rounds" / f"round_{prev_round}" / "global" / "model.pkl",
-                cwd / "models" / f"model_global_g{prev_round}.pkl",
-                cwd / "models" / f"global_model_round_{prev_round}.pkl"
-            ]
-            
-            for model_path in candidate_paths:
-                if model_path.exists():
-                    try:
-                        with open(model_path, "rb") as f:
-                            loaded_data = pickle.load(f)
-                            if isinstance(loaded_data, tuple):
-                                ndarrays = loaded_data[0]
-                            else:
-                                ndarrays = loaded_data
-                        initial_parameters = ndarrays_to_parameters(ndarrays)
-                        # Also set weights on init_model for consistency
-                        set_weights(init_model, ndarrays)
-                        logger.info(f"[Cloud Server] Loaded trained model from round {prev_round}")
-                        break
-                    except Exception as e:
-                        logger.warning(f"[Cloud Server] Failed to load {model_path}: {e}")
-        
-        # If no previous model found, create fresh parameters
-        if initial_parameters is None:
-            initial_parameters = ndarrays_to_parameters(get_weights(init_model))
-            logger.info(f"[Cloud Server] Created fresh model parameters for round {global_round}")
+        initial_parameters = ndarrays_to_parameters(get_weights(init_model))
+        logger.info(f"[Cloud Server] FEDGE: Using fresh model for initialization (cluster params managed internally)")
 
         # Get number of servers from environment (set by orchestrator)
         num_servers = int(os.getenv('NUM_SERVERS', '3'))

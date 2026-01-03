@@ -260,6 +260,8 @@ def global_complete_signal(round_no: int) -> Path:
 
 
 def global_model_path(round_no: int) -> Path:
+    """DEPRECATED in FEDGE: Global model path is not used in Fedge architecture."""
+    logger.warning("FEDGE WARNING: global_model_path() called but Fedge has no global model")
     return round_dir(round_no) / "global" / "model.pkl"
 
 
@@ -943,17 +945,45 @@ def _enforce_strict_server_barrier(global_round: int, done: set[int], failed: se
 
 def _assert_cloud_outputs(global_round: int) -> None:
     """
-    Hard check that cloud aggregation produced the expected global model files.
-    Raises RuntimeError if cloud outputs are missing.
+    FEDGE: Check that cloud aggregation produced cluster model files.
+    In Fedge architecture, there is NO global model - only cluster models.
+    Raises RuntimeError if no cluster outputs are found.
     """
+    clusters_dir = PROJECT_ROOT / "clusters"
     models_dir = PROJECT_ROOT / "models"
-    legacy = models_dir / f"model_global_g{global_round}.pkl"
-    rounds_global = PROJECT_ROOT / "rounds" / f"round_{global_round}" / "global" / "model.pkl"
-    if not (legacy.exists() or rounds_global.exists()):
+
+    # Check for cluster assignment file
+    clusters_json_found = False
+    for clusters_path in [
+        clusters_dir / f"clusters_g{global_round}.json",
+        models_dir / f"clusters_g{global_round}.json",
+    ]:
+        if clusters_path.exists():
+            clusters_json_found = True
+            logger.info(f"✅ FEDGE: Found cluster assignments at {clusters_path}")
+            break
+
+    # Check for at least one cluster model
+    cluster_model_found = False
+    for cluster_id in range(10):  # Check up to 10 clusters
+        for model_path in [
+            clusters_dir / f"model_cluster{cluster_id}_g{global_round}.pkl",
+            models_dir / f"model_cluster{cluster_id}_g{global_round}.pkl",
+        ]:
+            if model_path.exists():
+                cluster_model_found = True
+                logger.info(f"✅ FEDGE: Found cluster model at {model_path}")
+                break
+        if cluster_model_found:
+            break
+
+    if not cluster_model_found:
         raise RuntimeError(
-            f"Cloud aggregation produced no global model for round {global_round}. "
-            f"Expected {legacy} or {rounds_global}."
+            f"FEDGE: Cloud aggregation produced no cluster models for round {global_round}. "
+            f"Expected cluster models in {clusters_dir} or {models_dir}."
         )
+
+    logger.info(f"✅ FEDGE: Cloud outputs validated for round {global_round}")
 
 
 def _distribute_cluster_heads(global_round: int) -> None:
@@ -1011,26 +1041,16 @@ def _distribute_cluster_heads(global_round: int) -> None:
             logger.warning(f"Failed to process cluster assignments: {e}")
             clusters_json = None  # Fall back to global heads
     
-    # 2) Fallback to global heads if no clustering or clustering failed
+    # FEDGE: No global fallback - cluster models are mandatory
     if not clusters_json:
-        logger.warning("No clusters mapping found; falling back to global head")
-        # Try both locations for global model
-        global_model = None
-        for global_path in [
-            round_dir / "model.pkl",
-            models_dir / f"model_global_g{global_round}.pkl",
-        ]:
-            if global_path.exists():
-                global_model = global_path
-                break
-        
-        if global_model:
-            for sid in server_ids:
-                dst = models_dir / f"head_{sid}.pkl"
-                shutil.copyfile(global_model, dst)
-                logger.info(f"📋 Created global fallback head for server {sid}: {dst}")
-        else:
-            logger.warning(f"No global model found for round {global_round} fallback heads")
+        logger.error(
+            f"❌ FEDGE ERROR: No cluster assignments found for round {global_round}. "
+            "In Fedge architecture, clustering is mandatory - there is no global model fallback."
+        )
+        raise RuntimeError(
+            f"FEDGE: Clustering failed for round {global_round}. "
+            "Cannot continue without cluster assignments."
+        )
 
 
 def wait_for_global_completion(global_round: int) -> bool:
@@ -1116,73 +1136,18 @@ def aggregate_server_models(global_round: int) -> None:
     logger.info(f"⭐ FedAvg aggregation for global round {global_round} completed.")
 
 
-def evaluate_and_save_global_metrics(global_round: int) -> None:
-    """Evaluate aggregated global model on HHAR test set and save metrics."""
-    try:
-        # HHAR: use dedicated test loader and Net
-        from fedge.task import Net, test, get_eval_loader, set_weights
-        import torch
-        import pickle
-        
-        # Optimized metrics storage helpers
-        from fedge.utils.fs_optimized import save_global_metrics_optimized, get_global_model_path
-        
-        # Determine which aggregated model to load
-        candidate_paths = []
-        # Prefer the new rounds directory structure
-        rounds_model_path = PROJECT_ROOT / "rounds" / f"round_{global_round}" / "global" / "model.pkl"
-        candidate_paths.append(rounds_model_path)
-        # Legacy paths for compatibility
-        models_dir = PROJECT_ROOT / "models"
-        candidate_paths.append(get_global_model_path(PROJECT_ROOT, global_round))
-        candidate_paths.append(models_dir / f"model_global_g{global_round}.pkl")
-        candidate_paths.append(models_dir / f"global_model_round_{global_round}.pkl")
-        # Fallback to aggregated head saved by FedAvg (identical for all heads)
-        candidate_paths.append(models_dir / "head_0.pkl")
-        # As a last resort, try any server head
-        for sid in range(NUM_SERVERS):
-            candidate_paths.append(models_dir / f"head_{sid}.pkl")
-        
-        model_path = next((p for p in candidate_paths if p.exists()), None)
-        if model_path is None:
-            logger.warning(f"[Global Eval] No aggregated model found for round {global_round} under {models_dir}")
-            return
-        
-        with open(model_path, "rb") as f:
-            global_weights = pickle.load(f)
-        
-        # Initialize model and device
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        model = Net().to(device)
-        set_weights(model, global_weights)
-        
-        # Evaluate on the HHAR test set
-        test_loader = get_eval_loader(batch_size=64)
-        loss, accuracy = test(model, test_loader, device)
-        total_samples = len(test_loader.dataset)
-        
-        # Save global metrics using consolidated storage
-        global_metrics = {
-            'global_accuracy': accuracy,
-            'global_loss': loss,
-            'total_samples': total_samples,
-            'convergence_rate': 0.0,
-            'generalization_gap': 0.0,
-        }
-        save_global_metrics_optimized(PROJECT_ROOT, global_round, global_metrics)
-        logger.info(f"[Global Eval] Global Model: {accuracy:.4f} accuracy, {loss:.4f} loss, {total_samples} samples")
-        logger.info("💾 Global metrics saved using consolidated storage")
-        
-    except Exception as e:
-        logger.error(f"[Global Eval] Failed to evaluate global model for round {global_round}: {e}")
-        import traceback
-        traceback.print_exc()
-
 # ──────────────────────────────────────────────────────────────────────────────
 #  Main driver
 # ──────────────────────────────────────────────────────────────────────────────
 def run() -> None:
-    """Entry-point: orchestrate hierarchical federated learning with global model evaluation."""
+    """FEDGE: Orchestrate hierarchical federated learning with cluster-based aggregation.
+
+    In Fedge architecture:
+    - NO global model exists (except for round 1 initialization)
+    - Servers are clustered based on model similarity
+    - Each server receives its cluster's aggregated model
+    - Evaluation is performed on server-local data only
+    """
     # Initialize comprehensive logging
     summary_file = create_run_summary()
     # Removed verbose system info logging - kept in summary file only
@@ -1262,10 +1227,10 @@ def run() -> None:
             # ── Step 5.2: Distribute cluster heads for next round warm-start ──
             logger.info("📋 Step 5.2: Distributing cluster heads for warm-start")
             _distribute_cluster_heads(gr)
-                
-            # ── Step 6: Evaluate global model and save metrics ──
-            logger.info("📊 Step 6: Evaluating global model performance")
-            evaluate_and_save_global_metrics(gr)
+
+            # FEDGE: No global model evaluation - only cluster/server-local metrics
+            # Metrics are already collected by leaf_server.py and cloud_flower.py
+            logger.info("📊 FEDGE: Skipping global model evaluation (cluster-only architecture)")
 
             logger.info(f"✅ Global round {gr} completed successfully!")
 

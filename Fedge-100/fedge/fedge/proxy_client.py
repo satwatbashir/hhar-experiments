@@ -60,16 +60,16 @@ class ProxyClient(NumPyClient):
         self._sent_complete = False  # prevent duplicates
 
         # Use absolute path to project root (consistent with orchestrator)
-        project_root = Path(__file__).resolve().parent.parent
+        self.project_root = Path(__file__).resolve().parent.parent
 
         # Current global round (1-indexed for directory structure)
-        global_round = int(os.environ.get("GLOBAL_ROUND", "1"))
+        self.global_round = int(os.environ.get("GLOBAL_ROUND", "1"))
 
         # Standard directory structure: rounds/round_X/leaf/server_Y/
-        self.base_dir = project_root / "rounds" / f"round_{global_round}" / "leaf" / f"server_{server_id}"
+        self.base_dir = self.project_root / "rounds" / f"round_{self.global_round}" / "leaf" / f"server_{server_id}"
         
         # Use canonical model path helper for consistency
-        model_path = get_model_path(project_root, server_id, global_round)
+        model_path = get_model_path(self.project_root, server_id, self.global_round)
         if not model_path.exists():
             # Wait (up to 300 s) for the leaf server to save the model
             wait_sec, max_wait = 0, 300
@@ -107,7 +107,7 @@ class ProxyClient(NumPyClient):
         # Initialize model for evaluation on this server's local shard (union of its clients)
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         try:
-            cfg = toml.load(project_root / "pyproject.toml")
+            cfg = toml.load(self.project_root / "pyproject.toml")
             hier = cfg["tool"]["flwr"]["hierarchy"]
             cps_cfg = hier.get("clients_per_server", 3)
             if isinstance(cps_cfg, list):
@@ -159,7 +159,7 @@ class ProxyClient(NumPyClient):
             if write_header:
                 writer.writeheader()
             writer.writerow({
-                "global_round": global_round,
+                "global_round": self.global_round,
                 "proxy_id": self.proxy_id,
                 "server_id": server_id,
                 "signal_type": "started",
@@ -194,29 +194,68 @@ class ProxyClient(NumPyClient):
         }
 
     def evaluate(self, parameters, config) -> Tuple[float, int, dict]:
-        # Update model weights from server and run evaluation
-        set_weights(self.net, parameters)
-        # Evaluate on the union of this server's clients (server-local shard)
-        total_n = 0
-        loss_sum = 0.0
-        acc_sum = 0.0
-        for cid in range(self.clients_per_server):
-            _, valloader, _ = load_data(
-                "hhar",
-                partition_id=cid,
-                num_partitions=self.num_servers * self.clients_per_server,
-                batch_size=128,
-                server_id=self.server_id,
-            )
-            l, a = test(self.net, valloader, self.device)
-            n = len(valloader.dataset)
-            total_n += n
-            loss_sum += l * n
-            acc_sum += a * n
-        loss = (loss_sum / total_n) if total_n > 0 else float("nan")
-        accuracy = (acc_sum / total_n) if total_n > 0 else 0.0
-        num_examples = total_n
-        logger.debug(f"[{self.proxy_id}] Local-shard Eval -> loss: {loss}, samples: {num_examples}, accuracy: {accuracy}")
+        # OPTIMIZATION: Use cached metrics from leaf server instead of re-evaluating
+        # This avoids redundant computation since leaf server already evaluated on same data
+        try:
+            import json
+            from fedge.utils.fs_optimized import get_model_path
+            model_path = get_model_path(self.project_root, self.server_id, self.global_round)
+            metrics_path = model_path.with_suffix('.metrics.json')
+
+            if metrics_path.exists():
+                with open(metrics_path, 'r') as f:
+                    cached = json.load(f)
+                loss = cached.get("loss", float("nan"))
+                accuracy = cached.get("accuracy", 0.0)
+                num_examples = cached.get("num_examples", 0)
+                logger.info(f"[{self.proxy_id}] Using cached metrics from leaf server (saved computation)")
+            else:
+                # Fallback: evaluate if cache not available
+                logger.warning(f"[{self.proxy_id}] No cached metrics found, falling back to evaluation")
+                set_weights(self.net, parameters)
+                total_n = 0
+                loss_sum = 0.0
+                acc_sum = 0.0
+                for cid in range(self.clients_per_server):
+                    _, valloader, _ = load_data(
+                        "hhar",
+                        partition_id=cid,
+                        num_partitions=self.num_servers * self.clients_per_server,
+                        batch_size=128,
+                        server_id=self.server_id,
+                    )
+                    l, a = test(self.net, valloader, self.device)
+                    n = len(valloader.dataset)
+                    total_n += n
+                    loss_sum += l * n
+                    acc_sum += a * n
+                loss = (loss_sum / total_n) if total_n > 0 else float("nan")
+                accuracy = (acc_sum / total_n) if total_n > 0 else 0.0
+                num_examples = total_n
+        except Exception as e:
+            logger.error(f"[{self.proxy_id}] Error reading cached metrics: {e}, falling back to evaluation")
+            set_weights(self.net, parameters)
+            total_n = 0
+            loss_sum = 0.0
+            acc_sum = 0.0
+            for cid in range(self.clients_per_server):
+                _, valloader, _ = load_data(
+                    "hhar",
+                    partition_id=cid,
+                    num_partitions=self.num_servers * self.clients_per_server,
+                    batch_size=128,
+                    server_id=self.server_id,
+                )
+                l, a = test(self.net, valloader, self.device)
+                n = len(valloader.dataset)
+                total_n += n
+                loss_sum += l * n
+                acc_sum += a * n
+            loss = (loss_sum / total_n) if total_n > 0 else float("nan")
+            accuracy = (acc_sum / total_n) if total_n > 0 else 0.0
+            num_examples = total_n
+
+        logger.debug(f"[{self.proxy_id}] Eval -> loss: {loss}, samples: {num_examples}, accuracy: {accuracy}")
 
         # Return evaluation results first
         bytes_down = raw_bytes(parameters)

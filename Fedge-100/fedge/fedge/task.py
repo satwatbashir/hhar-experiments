@@ -377,21 +377,6 @@ def make_loader(dataset: Dataset, batch_size: int, shuffle: bool,
 def subset(dataset: Dataset, indices: Sequence[int]) -> Dataset:
     return Subset(dataset, indices=list(indices))
 
-def get_eval_loader(batch_size: int = 32) -> DataLoader:
-    """Get HHAR centralized test DataLoader (20% tail split)."""
-    X, y, means, stds = load_hhar_data()
-    ds = HHARDataset(X, y, normalize=True, means=means, stds=stds)
-    n = len(ds)
-    n_train = int(0.8 * n)
-    test_idx = np.arange(n_train, n, dtype=np.int64)
-    # Use config-driven eval batch size if present
-    try:
-        eval_bsz = int(_get_hier_cfg().get("eval_batch_size", batch_size))
-    except Exception:
-        eval_bsz = batch_size
-    pin = torch.cuda.is_available()
-    return DataLoader(Subset(ds, test_idx), batch_size=eval_bsz, shuffle=False, pin_memory=pin)
-
 
 def _to_plain_ints(arr: Sequence) -> List[int]:
     return [int(x if not hasattr(x, "item") else x.item()) for x in arr]
