@@ -44,7 +44,7 @@ loss_delta = 0.002
 dataset_flag = "hhar"
 
 # SCAFFOLD + FedProx parameters
-scaffold_enabled = true
+scaffold_enabled = false
 
 # Learning parameters
 lr_init = 0.05
