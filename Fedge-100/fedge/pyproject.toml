@@ -53,8 +53,8 @@ lr_init = 0.05
 server_lr = 1.0
 global_lr = 1.0
 local_epochs = 5
-batch_size = 64
-eval_batch_size = 128
+batch_size = 32
+eval_batch_size = 64
 es_delta = 0.001
 es_patience = 5
 
