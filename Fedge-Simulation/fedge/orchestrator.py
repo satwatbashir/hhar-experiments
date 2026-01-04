@@ -93,7 +93,8 @@ CLUSTER_BETTER_DELTA = float(HIER_CFG["cluster_better_delta"])
 
 # SCAFFOLD warmup: Don't apply SCAFFOLD until model stabilizes
 # This prevents NaN with imbalanced data (e.g., HHAR where Server 0 has 5x more data)
-SCAFFOLD_WARMUP_ROUNDS = 2  # Start SCAFFOLD from round 3
+# Increased to 5 rounds after NaN explosion observed at round 4 with SEED=43
+SCAFFOLD_WARMUP_ROUNDS = 5  # Start SCAFFOLD from round 6
 
 # Seed
 SEED = int(os.environ.get("SEED", CONFIG["tool"]["flwr"]["app"]["config"].get("seed", 42)))
