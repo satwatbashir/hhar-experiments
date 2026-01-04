@@ -23,6 +23,7 @@ import time
 import random
 import logging
 import gc
+import csv
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 from collections import defaultdict
@@ -623,11 +624,19 @@ class SimulationOrchestrator:
         self.global_model = Net()
         self.global_weights = get_weights(self.global_model)
 
-        # Metrics collection
+        # Metrics collection (per-round append mode like Fedge-100)
         self.run_dir = PROJECT_ROOT / "runs" / f"seed{SEED}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         self.run_dir.mkdir(parents=True, exist_ok=True)
 
-        self.metrics_history = []
+        self.metrics_dir = self.run_dir / "metrics"
+        self.metrics_dir.mkdir(parents=True, exist_ok=True)
+
+        # CSV file paths
+        self.global_csv = self.metrics_dir / "global_rounds.csv"
+        self.server_csvs = {
+            sid: self.metrics_dir / f"server_{sid}.csv"
+            for sid in range(NUM_SERVERS)
+        }
 
     def _initialize_components(self):
         """Initialize leaf servers and clients."""
@@ -732,6 +741,11 @@ class SimulationOrchestrator:
 
         self.metrics_history.append(metrics)
 
+        # Save metrics immediately (append mode like Fedge-100)
+        self._save_global_round_metrics(metrics)
+        for server in self.leaf_servers:
+            self._save_server_round_metrics(server.server_id, server.round_metrics[-1])
+
         logger.info(f"[Round {global_round}] acc={avg_accuracy:.4f}, loss={avg_loss:.4f}, "
                    f"clusters={len(self.cloud.cluster_parameters)}, time={round_time:.1f}s")
 
@@ -745,19 +759,16 @@ class SimulationOrchestrator:
         for global_round in range(1, GLOBAL_ROUNDS + 1):
             self.run_global_round(global_round)
 
-            # Periodic garbage collection and incremental metrics save
+            # Periodic garbage collection
             if global_round % 10 == 0:
                 gc.collect()
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
-                # Save metrics incrementally (prevents data loss on crash)
-                self._save_metrics()
-                logger.info(f"[Checkpoint] Metrics saved at round {global_round}")
 
         total_time = time.time() - start_time
 
-        # Save final metrics
-        self._save_metrics()
+        # Save cluster history (metrics already saved per-round)
+        self._save_cluster_history()
 
         logger.info(f"[Orchestrator] Simulation complete!")
         logger.info(f"[Orchestrator] Total time: {total_time/60:.1f} minutes ({total_time/3600:.2f} hours)")
@@ -766,26 +777,52 @@ class SimulationOrchestrator:
         final_acc = self.metrics_history[-1]["avg_accuracy"]
         logger.info(f"[Orchestrator] Final accuracy: {final_acc:.4f}")
 
-    def _save_metrics(self):
-        """Save all metrics to CSV files."""
-        metrics_dir = self.run_dir / "metrics"
-        metrics_dir.mkdir(parents=True, exist_ok=True)
+    def _save_global_round_metrics(self, metrics: Dict):
+        """Append one row to global_rounds.csv (like Fedge-100)."""
+        fieldnames = [
+            "global_round", "avg_accuracy", "avg_loss",
+            "num_clusters", "cluster_map", "round_time"
+        ]
 
-        # Save global metrics
-        df = pd.DataFrame(self.metrics_history)
-        df.to_csv(metrics_dir / "global_rounds.csv", index=False)
+        write_header = not self.global_csv.exists()
+        with open(self.global_csv, "a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            if write_header:
+                writer.writeheader()
 
-        # Save per-server metrics
-        for server in self.leaf_servers:
-            server_df = pd.DataFrame(server.round_metrics)
-            server_df.to_csv(metrics_dir / f"server_{server.server_id}.csv", index=False)
+            writer.writerow({
+                "global_round": metrics["global_round"],
+                "avg_accuracy": metrics["avg_accuracy"],
+                "avg_loss": metrics["avg_loss"],
+                "num_clusters": metrics["num_clusters"],
+                "cluster_map": json.dumps(metrics["cluster_map"]),
+                "round_time": metrics["round_time"]
+            })
 
-        # Save cluster history
+    def _save_server_round_metrics(self, server_id: int, metrics: Dict):
+        """Append one row to server_{id}.csv (like Fedge-100)."""
+        fieldnames = [
+            "server_id", "global_round",
+            "avg_client_train_loss", "avg_client_accuracy",
+            "server_test_loss", "server_test_accuracy",
+            "num_clients", "total_train_samples", "total_test_samples"
+        ]
+
+        csv_path = self.server_csvs[server_id]
+        write_header = not csv_path.exists()
+        with open(csv_path, "a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            if write_header:
+                writer.writeheader()
+
+            writer.writerow(metrics)
+
+    def _save_cluster_history(self):
+        """Save cluster history to JSON at the end."""
         if self.cloud.cluster_history:
-            with open(metrics_dir / "cluster_history.json", "w") as f:
+            with open(self.metrics_dir / "cluster_history.json", "w") as f:
                 json.dump(self.cloud.cluster_history, f, indent=2)
-
-        logger.info(f"[Orchestrator] Metrics saved to {metrics_dir}")
+        logger.info(f"[Orchestrator] All metrics saved to {self.metrics_dir}")
 
 
 # ==============================================================================
