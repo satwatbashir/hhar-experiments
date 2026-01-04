@@ -638,6 +638,9 @@ class SimulationOrchestrator:
             for sid in range(NUM_SERVERS)
         }
 
+        # Track metrics history for final summary
+        self.metrics_history = []
+
     def _initialize_components(self):
         """Initialize leaf servers and clients."""
         logger.info("[Orchestrator] Initializing leaf servers and clients...")
