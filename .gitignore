@@ -89,3 +89,7 @@ Thumbs.db
 *.bak
 *.tmp
 *.temp
+
+# Local symlinks
+Fedge-Simulation/fedge/data/
+Fedge-Simulation/fedge/hhar

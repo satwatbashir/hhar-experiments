@@ -53,7 +53,7 @@ class SCAFFOLDControlVariates:
                             global_model: nn.Module,
                             learning_rate: float,
                             local_epochs: int,
-                            clip_value: float = 1.0) -> None:
+                            clip_value: float = 0.5) -> None:
         """
         Update client control variate after local training.
 
@@ -63,6 +63,7 @@ class SCAFFOLDControlVariates:
         Args:
             clip_value: Maximum absolute value for control variates (prevents explosion
                        with imbalanced data like HHAR where some servers have 5x more data)
+                       Reduced from 1.0 to 0.5 after NaN observed with SEED=43
         """
         with torch.no_grad():
             for name, local_param in local_model.named_parameters():

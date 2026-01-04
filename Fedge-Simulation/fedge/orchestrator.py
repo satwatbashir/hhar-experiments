@@ -723,11 +723,14 @@ class SimulationOrchestrator:
         for global_round in range(1, GLOBAL_ROUNDS + 1):
             self.run_global_round(global_round)
 
-            # Periodic garbage collection
+            # Periodic garbage collection and incremental metrics save
             if global_round % 10 == 0:
                 gc.collect()
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
+                # Save metrics incrementally (prevents data loss on crash)
+                self._save_metrics()
+                logger.info(f"[Checkpoint] Metrics saved at round {global_round}")
 
         total_time = time.time() - start_time
 
