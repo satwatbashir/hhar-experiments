@@ -420,21 +420,47 @@ class SimulatedLeafServer:
         # Update latest parameters
         self.latest_parameters = aggregated_weights
 
-        # Compute aggregated metrics
-        avg_loss = np.mean([m["train_loss"] for _, _, m in client_results])
-        avg_accuracy = np.mean([m["accuracy"] for _, _, m in client_results])
+        # Compute client-level aggregated metrics (for reference)
+        avg_client_train_loss = np.mean([m["train_loss"] for _, _, m in client_results])
+        avg_client_accuracy = np.mean([m["accuracy"] for _, _, m in client_results])
+
+        # SERVER-LEVEL EVALUATION: Evaluate aggregated server model on all clients' test data
+        server_net = Net()
+        set_weights(server_net, aggregated_weights)
+        server_net.to(self.device)
+
+        total_test_loss = 0.0
+        total_test_correct = 0
+        total_test_samples = 0
+
+        with torch.no_grad():
+            for client in self.clients:
+                for batch in client.testloader:
+                    images, labels = batch[0].to(self.device), batch[1].to(self.device)
+                    outputs = server_net(images)
+                    loss = torch.nn.functional.cross_entropy(outputs, labels, reduction='sum')
+                    total_test_loss += loss.item()
+                    _, predicted = torch.max(outputs, 1)
+                    total_test_correct += (predicted == labels).sum().item()
+                    total_test_samples += labels.size(0)
+
+        server_test_loss = total_test_loss / total_test_samples if total_test_samples > 0 else 0.0
+        server_test_accuracy = total_test_correct / total_test_samples if total_test_samples > 0 else 0.0
 
         server_metrics = {
             "server_id": self.server_id,
             "global_round": global_round,
-            "avg_train_loss": avg_loss,
-            "avg_accuracy": avg_accuracy,
+            "avg_client_train_loss": avg_client_train_loss,
+            "avg_client_accuracy": avg_client_accuracy,
+            "server_test_loss": server_test_loss,
+            "server_test_accuracy": server_test_accuracy,
             "num_clients": len(self.clients),
-            "total_samples": total_examples
+            "total_train_samples": total_examples,
+            "total_test_samples": total_test_samples
         }
 
         self.round_metrics.append(server_metrics)
-        logger.info(f"[Server {self.server_id}] Round {global_round}: loss={avg_loss:.4f}, acc={avg_accuracy:.4f}")
+        logger.info(f"[Server {self.server_id}] Round {global_round}: test_loss={server_test_loss:.4f}, test_acc={server_test_accuracy:.4f}")
 
         return aggregated_weights, server_metrics
 
@@ -524,11 +550,7 @@ class CloudAggregator:
             self.cluster_map = {sid: 0 for sid in server_ids}
             self.cluster_parameters = {0: global_weights}
 
-        # Compute and log metrics
-        avg_accuracy = np.mean([
-            m.get("avg_accuracy", 0) for _, _, m in server_models if isinstance(m, dict)
-        ]) if any(isinstance(m, dict) for _, _, m in server_models) else 0.0
-
+        # Log clustering result
         metrics = {
             "global_round": global_round,
             "num_clusters": len(self.cluster_parameters),
@@ -694,10 +716,10 @@ class SimulationOrchestrator:
             new_global.append(weighted_sum / total_samples)
         self.global_weights = new_global
 
-        # Compute round metrics
+        # Compute round metrics (using SERVER test metrics, not client averages)
         round_time = time.time() - round_start
-        avg_accuracy = np.mean([s.round_metrics[-1]["avg_accuracy"] for s in self.leaf_servers])
-        avg_loss = np.mean([s.round_metrics[-1]["avg_train_loss"] for s in self.leaf_servers])
+        avg_accuracy = np.mean([s.round_metrics[-1]["server_test_accuracy"] for s in self.leaf_servers])
+        avg_loss = np.mean([s.round_metrics[-1]["server_test_loss"] for s in self.leaf_servers])
 
         metrics = {
             "global_round": global_round,
