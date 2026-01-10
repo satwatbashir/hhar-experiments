@@ -403,7 +403,7 @@ class CloudFedAvg(FedAvg):
         self.prev_central_acc = central_acc
 
         # ══════════════════════════════════════════════════════════════════════
-        # READ leaf server CSVs and WRITE distributed_metrics.csv + servers_metrics.csv
+        # READ server partition metrics and WRITE distributed_metrics.csv + server_{sid}.csv
         # ══════════════════════════════════════════════════════════════════════
         self._write_distributed_and_servers_csv(current_global)
 
@@ -421,73 +421,93 @@ class CloudFedAvg(FedAvg):
 
     def _write_distributed_and_servers_csv(self, round_num: int):
         """
-        Read metrics from leaf server CSVs and write:
-        - distributed_metrics.csv (aggregated stats)
-        - servers_metrics.csv (per-server breakdown)
+        Read SERVER PARTITION metrics from leaf servers and write:
+        - distributed_metrics.csv (aggregated stats across servers)
+        - server_{sid}.csv (one file per server with partition metrics)
+
+        Uses server_partition_test_accuracy/loss directly - NO client-level data.
         """
-        all_acc, all_loss, all_weights = [], [], []
-        comp_times, up_bytes, down_bytes = [], [], []
-        per_server_data: Dict[int, Dict[str, Any]] = {}
+        server_accs, server_losses = [], []
+        total_bytes_up, total_bytes_down = 0, 0
+        total_comp_time = 0.0
 
         for sid in range(NUM_SERVERS):
             base_dir = fs.leaf_server_dir(project_root, sid)
-            server_accs, server_losses = [], []
-            server_comp, server_upb, server_dnb = [], [], []
+            # Read from servers/rounds.csv - the server partition metrics
+            server_rounds_csv = base_dir / "metrics" / "servers" / "rounds.csv"
 
-            # Read clients.csv from each server
-            clients_csv = base_dir / "metrics" / "clients.csv"
-            if clients_csv.exists():
+            srv_acc, srv_loss = None, None
+            srv_bytes_up, srv_bytes_down = 0, 0
+            srv_comp_time, srv_round_time = 0.0, 0.0
+
+            if server_rounds_csv.exists():
                 try:
-                    with open(clients_csv, "r", encoding="utf-8") as f:
+                    with open(server_rounds_csv, "r", encoding="utf-8") as f:
                         reader = csv.DictReader(f)
-                        rows = [r for r in reader if int(r.get("global_round", -1)) == round_num]
-                    for r in rows:
-                        acc = float(r.get("test_accuracy", 0.0) or 0.0)
-                        loss_val = float(r.get("test_loss", 0.0) or 0.0)
-                        n = int(r.get("num_examples", 1) or 1)
-
-                        all_acc.append(acc)
-                        all_loss.append(loss_val)
-                        all_weights.append(n)
-                        server_accs.append(acc)
-                        server_losses.append(loss_val)
-
-                        comp = float(r.get("comp_time_sec", 0.0) or 0.0)
-                        up = float(r.get("upload_bytes", 0) or 0)
-                        dn = float(r.get("download_bytes", 0) or 0)
-                        comp_times.append(comp)
-                        up_bytes.append(up)
-                        down_bytes.append(dn)
-                        server_comp.append(comp)
-                        server_upb.append(up)
-                        server_dnb.append(dn)
+                        for r in reader:
+                            if int(r.get("global_round", -1)) == round_num:
+                                # Get server partition metrics directly
+                                srv_acc = float(r.get("server_partition_test_accuracy", 0.0) or 0.0)
+                                srv_loss = float(r.get("server_partition_test_loss", 0.0) or 0.0)
+                                srv_bytes_up = int(r.get("bytes_up_total", 0) or 0)
+                                srv_bytes_down = int(r.get("bytes_down_total", 0) or 0)
+                                srv_comp_time = float(r.get("comp_time_sec_mean", 0.0) or 0.0)
+                                srv_round_time = float(r.get("round_time_sec", 0.0) or 0.0)
+                                break
                 except Exception:
                     pass
 
-            per_server_data[sid] = {
-                "accs": server_accs, "losses": server_losses,
-                "comp": server_comp, "upb": server_upb, "dnb": server_dnb,
-            }
+            # Collect for distributed stats
+            if srv_acc is not None:
+                server_accs.append(srv_acc)
+                server_losses.append(srv_loss)
+                total_bytes_up += srv_bytes_up
+                total_bytes_down += srv_bytes_down
+                total_comp_time += srv_comp_time
 
-        # Compute statistics using t-distribution CI
-        n_total = sum(all_weights) if all_weights else 1
-        avg_acc = float(sum(w * a for w, a in zip(all_weights, all_acc)) / max(1, n_total)) if all_weights else 0.0
-        avg_loss = float(sum(w * l for w, l in zip(all_weights, all_loss)) / max(1, n_total)) if all_weights else 0.0
-        _, acc_sd, acc_ci_lo, acc_ci_hi = _mean_std_ci(all_acc) if all_acc else (0.0, 0.0, 0.0, 0.0)
-        _, loss_sd, loss_ci_lo, loss_ci_hi = _mean_std_ci(all_loss) if all_loss else (0.0, 0.0, 0.0, 0.0)
+            # Write individual server_{sid}.csv file
+            server_csv_path = metrics_dir / f"server_{sid}.csv"
+            srv_write_header = not server_csv_path.exists()
+            srv_fieldnames = [
+                "round", "server_partition_accuracy", "server_partition_loss",
+                "bytes_up", "bytes_down", "comp_time_sec", "round_time_sec"
+            ]
+            with open(server_csv_path, "a", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=srv_fieldnames)
+                if srv_write_header:
+                    writer.writeheader()
+                writer.writerow({
+                    "round": round_num,
+                    "server_partition_accuracy": srv_acc if srv_acc is not None else 0.0,
+                    "server_partition_loss": srv_loss if srv_loss is not None else 0.0,
+                    "bytes_up": srv_bytes_up,
+                    "bytes_down": srv_bytes_down,
+                    "comp_time_sec": srv_comp_time,
+                    "round_time_sec": srv_round_time,
+                })
 
-        # Build distributed record (aggregated only, no per-client breakdown)
+        # Compute statistics across servers using t-distribution CI
+        if server_accs:
+            acc_mean, acc_std, acc_ci_lo, acc_ci_hi = _mean_std_ci(server_accs)
+            loss_mean, loss_std, loss_ci_lo, loss_ci_hi = _mean_std_ci(server_losses)
+        else:
+            acc_mean, acc_std, acc_ci_lo, acc_ci_hi = 0.0, 0.0, 0.0, 0.0
+            loss_mean, loss_std, loss_ci_lo, loss_ci_hi = 0.0, 0.0, 0.0, 0.0
+
+        # Build distributed record (aggregated server partition metrics)
         distributed = {
-            "avg_accuracy": avg_acc, "avg_loss": avg_loss,
-            "accuracy_std": acc_sd, "loss_std": loss_sd,
-            "acc_ci95_lo": float(acc_ci_lo), "acc_ci95_hi": float(acc_ci_hi),
-            "loss_ci95_lo": float(loss_ci_lo), "loss_ci95_hi": float(loss_ci_hi),
-            "avg_comp_time_sec": float(np.mean(comp_times)) if comp_times else 0.0,
-            "total_comp_time_sec": float(np.sum(comp_times)) if comp_times else 0.0,
-            "avg_upload_MB": (float(np.mean(up_bytes)) / 1e6) if up_bytes else 0.0,
-            "total_upload_MB": (float(np.sum(up_bytes)) / 1e6) if up_bytes else 0.0,
-            "avg_download_MB": (float(np.mean(down_bytes)) / 1e6) if down_bytes else 0.0,
-            "total_download_MB": (float(np.sum(down_bytes)) / 1e6) if down_bytes else 0.0,
+            "avg_accuracy": acc_mean,
+            "avg_loss": loss_mean,
+            "accuracy_std": acc_std,
+            "loss_std": loss_std,
+            "acc_ci95_lo": float(acc_ci_lo),
+            "acc_ci95_hi": float(acc_ci_hi),
+            "loss_ci95_lo": float(loss_ci_lo),
+            "loss_ci95_hi": float(loss_ci_hi),
+            "total_bytes_up": total_bytes_up,
+            "total_bytes_down": total_bytes_down,
+            "total_comp_time_sec": total_comp_time,
+            "num_servers": len(server_accs),
         }
 
         # Write distributed_metrics.csv
@@ -499,37 +519,6 @@ class CloudFedAvg(FedAvg):
             if write_header:
                 writer.writeheader()
             writer.writerow({"round": round_num, **distributed})
-
-        # Write servers_metrics.csv (per-server breakdown)
-        servers_path = metrics_dir / "servers_metrics.csv"
-        srv_write_header = not servers_path.exists()
-        srv_fieldnames = ["round"]
-        for sid in range(NUM_SERVERS):
-            srv_fieldnames.extend([
-                f"server{sid}_avg_accuracy", f"server{sid}_avg_loss",
-                f"server{sid}_client_count", f"server{sid}_avg_comp_time_sec",
-                f"server{sid}_avg_upload_MB", f"server{sid}_avg_download_MB",
-            ])
-        srv_row = {"round": round_num}
-        for sid in range(NUM_SERVERS):
-            d = per_server_data.get(sid, {})
-            accs = d.get("accs", [])
-            losses = d.get("losses", [])
-            comps = d.get("comp", [])
-            upb = d.get("upb", [])
-            dnb = d.get("dnb", [])
-            srv_row[f"server{sid}_avg_accuracy"] = float(np.mean(accs)) if accs else 0.0
-            srv_row[f"server{sid}_avg_loss"] = float(np.mean(losses)) if losses else 0.0
-            srv_row[f"server{sid}_client_count"] = len(accs)
-            srv_row[f"server{sid}_avg_comp_time_sec"] = float(np.mean(comps)) if comps else 0.0
-            srv_row[f"server{sid}_avg_upload_MB"] = (float(np.mean(upb)) / 1e6) if upb else 0.0
-            srv_row[f"server{sid}_avg_download_MB"] = (float(np.mean(dnb)) / 1e6) if dnb else 0.0
-
-        with open(servers_path, "a", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=srv_fieldnames)
-            if srv_write_header:
-                writer.writeheader()
-            writer.writerow(srv_row)
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  MAIN: spin up the FedAvg server for exactly GLOBAL_ROUNDS * SERVER_ROUNDS_PER_GLOBAL
