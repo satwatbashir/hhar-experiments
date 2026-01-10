@@ -30,9 +30,9 @@ WINDOW_STRIDE_SECONDS = app_config.get("window-stride-seconds", 1)
 NUM_CLASSES = app_config.get("num-classes", 6)
 
 # Global seed for reproducibility
-# Priority: ENV variable SEED > config file > default (42)
+# Priority: ENV variable FL_SEED > config file > default (42)
 import random
-GLOBAL_SEED = int(os.environ.get("SEED", app_config.get("seed", 42)))
+GLOBAL_SEED = int(os.environ.get("FL_SEED", app_config.get("seed", 42)))
 
 # Set global seeds for reproducibility
 random.seed(GLOBAL_SEED)
