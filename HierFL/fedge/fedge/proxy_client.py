@@ -18,26 +18,29 @@ import logging
 from fedge.task import Net, load_data, set_weights, test, get_weights
 from fedge.utils import fs
 
-# Configure logging
+# Configure logging (minimal verbosity)
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.ERROR,
     format='[%(asctime)s] %(levelname)s - %(message)s',
 )
 logger = logging.getLogger(__name__)
 
-# Suppress Python deprecation warnings in flwr module
+# Suppress all noisy warnings
 import sys, logging, warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="flwr")
-# Elevate Flower, ECE, gRPC logger levels to ERROR to hide warning logs
-for name in ("flwr", "ece", "grpc"): logging.getLogger(name).setLevel(logging.ERROR)
-# Drop printed 'DEPRECATED FEATURE' messages from stdout/stderr
-class _DropDeprecated:
+for name in ("flwr", "ece", "grpc", "urllib3", "requests"):
+    logging.getLogger(name).setLevel(logging.ERROR)
+
+# Drop noisy messages from stdout/stderr
+class _DropNoisy:
     def __init__(self, out): self._out = out
     def write(self, txt):
-        if "DEPRECATED FEATURE" not in txt: self._out.write(txt)
+        skip = ("DEPRECATED FEATURE", "INFO flwr", "DEBUG flwr", "gRPC", "INFO:flwr")
+        if not any(s in txt for s in skip):
+            self._out.write(txt)
     def flush(self): self._out.flush()
-sys.stdout = _DropDeprecated(sys.stdout)
-sys.stderr = _DropDeprecated(sys.stderr)
+sys.stdout = _DropNoisy(sys.stdout)
+sys.stderr = _DropNoisy(sys.stderr)
 
 class ProxyClient(NumPyClient):
     def __init__(self, server_id):

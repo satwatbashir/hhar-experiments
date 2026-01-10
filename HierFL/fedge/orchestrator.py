@@ -34,6 +34,10 @@ os.environ.setdefault("RUN_DIR", RUN_DIR.as_posix())
 os.environ.setdefault("FLWR_LOGGING_FORMAT", "json")
 os.environ.setdefault("FLWR_LOGGING", "json")
 
+# Get FL_SEED for reproducibility and metrics folder organization
+FL_SEED = os.getenv("FL_SEED", "42")
+os.environ.setdefault("FL_SEED", FL_SEED)
+
 from fedge.utils import fs
 from fedge.partitioning import write_partitions  # noqa: E402
 from fedge.task import load_hhar_windows_with_users  # noqa: E402

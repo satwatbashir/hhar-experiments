@@ -43,6 +43,7 @@ from fedge.task import (
 )
 from fedge.cluster_utils import weight_clustering, flatten_last_layer
 from fedge.scaffold_utils import create_scaffold_manager, aggregate_scaffold_controls
+from fedge.stats import _mean_std_ci
 
 # Configure logging
 logging.basicConfig(
@@ -730,13 +731,23 @@ class SimulationOrchestrator:
 
         # Compute round metrics (using SERVER test metrics, not client averages)
         round_time = time.time() - round_start
-        avg_accuracy = np.mean([s.round_metrics[-1]["server_test_accuracy"] for s in self.leaf_servers])
-        avg_loss = np.mean([s.round_metrics[-1]["server_test_loss"] for s in self.leaf_servers])
+        server_accuracies = [s.round_metrics[-1]["server_test_accuracy"] for s in self.leaf_servers]
+        server_losses = [s.round_metrics[-1]["server_test_loss"] for s in self.leaf_servers]
+
+        # Calculate statistics with t-distribution CI
+        acc_mean, acc_std, acc_ci_lo, acc_ci_hi = _mean_std_ci(server_accuracies)
+        loss_mean, loss_std, loss_ci_lo, loss_ci_hi = _mean_std_ci(server_losses)
 
         metrics = {
             "global_round": global_round,
-            "avg_accuracy": avg_accuracy,
-            "avg_loss": avg_loss,
+            "avg_accuracy": acc_mean,
+            "avg_loss": loss_mean,
+            "accuracy_std": acc_std,
+            "loss_std": loss_std,
+            "acc_ci95_lo": acc_ci_lo,
+            "acc_ci95_hi": acc_ci_hi,
+            "loss_ci95_lo": loss_ci_lo,
+            "loss_ci95_hi": loss_ci_hi,
             "num_clusters": len(self.cloud.cluster_parameters),
             "cluster_map": self.cloud.cluster_map.copy(),
             "round_time": round_time
@@ -784,6 +795,8 @@ class SimulationOrchestrator:
         """Append one row to global_rounds.csv (like Fedge-100)."""
         fieldnames = [
             "global_round", "avg_accuracy", "avg_loss",
+            "accuracy_std", "loss_std",
+            "acc_ci95_lo", "acc_ci95_hi", "loss_ci95_lo", "loss_ci95_hi",
             "num_clusters", "cluster_map", "round_time"
         ]
 
@@ -797,6 +810,12 @@ class SimulationOrchestrator:
                 "global_round": metrics["global_round"],
                 "avg_accuracy": metrics["avg_accuracy"],
                 "avg_loss": metrics["avg_loss"],
+                "accuracy_std": metrics["accuracy_std"],
+                "loss_std": metrics["loss_std"],
+                "acc_ci95_lo": metrics["acc_ci95_lo"],
+                "acc_ci95_hi": metrics["acc_ci95_hi"],
+                "loss_ci95_lo": metrics["loss_ci95_lo"],
+                "loss_ci95_hi": metrics["loss_ci95_hi"],
                 "num_clusters": metrics["num_clusters"],
                 "cluster_map": json.dumps(metrics["cluster_map"]),
                 "round_time": metrics["round_time"]

@@ -16,15 +16,15 @@ from flwr.client import NumPyClient, start_client
 # Import your task utilities:
 from fedge.task import Net, load_data, set_weights, train, test, get_weights
 
-# ─── Logging setup ───────────────────────────────────────────────────────────
+# ─── Logging setup (minimal verbosity) ─────────────────────────────────────────
 logging.basicConfig(
-    level=logging.WARNING,
+    level=logging.ERROR,
     format='[%(asctime)s] %(levelname)s - %(message)s',
 )
 logger = logging.getLogger(__name__)
 
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="flwr")
-for name in ("flwr", "ece", "grpc"):
+for name in ("flwr", "ece", "grpc", "urllib3", "requests"):
     logging.getLogger(name).setLevel(logging.ERROR)
 
 # =============================================================================

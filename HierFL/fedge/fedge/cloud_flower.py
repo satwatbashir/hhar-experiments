@@ -23,6 +23,10 @@ from fedge.utils import fs
 from fedge.task import Net, load_data, test, set_weights
 from fedge.stats import _mean_std_ci
 import csv
+import numpy as np
+
+# Get SEED for metrics folder organization
+SEED = int(os.environ.get("FL_SEED", "42"))
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  Read **all** of our hierarchy config from pyproject.toml
@@ -37,6 +41,17 @@ NUM_SERVERS = hier["num_servers"]
 GLOBAL_ROUNDS = hier["global_rounds"]
 SERVER_ROUNDS_PER_GLOBAL = hier["server_rounds_per_global"]
 CLOUD_PORT = hier["cloud_port"]
+
+# Parse clients_per_server (can be int or list)
+raw_cps = hier.get("clients_per_server", 3)
+if isinstance(raw_cps, list):
+    CLIENTS_PER_SERVER = raw_cps
+else:
+    CLIENTS_PER_SERVER = [int(raw_cps)] * NUM_SERVERS
+
+# Create seed-based metrics directory
+metrics_dir = project_root / "metrics" / f"seed_{SEED}"
+metrics_dir.mkdir(parents=True, exist_ok=True)
 
 # Check if we should use the new directory structure
 use_new_dir_structure = os.environ.get("USE_NEW_DIR_STRUCTURE", "0") == "1"
@@ -102,33 +117,32 @@ def create_signal_file(file_path: Path, message: str) -> bool:
     try:
         with open(file_path, "w") as f:
             f.write(str(time.time()))
-        logging.info(f"[Cloud Server] {message}: {file_path}")
         return True
     except Exception as e:
-        logging.error(f"[Cloud Server] Could not create {file_path}: {e}")
         return False
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Logging / Warnings suppression
+#  Logging / Warnings suppression (reduced verbosity)
 # ──────────────────────────────────────────────────────────────────────────────
 
-logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s - %(message)s")
+logging.basicConfig(level=logging.WARNING, format="[%(asctime)s] %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="flwr")
-for name in ("flwr", "ece", "grpc"):
+for name in ("flwr", "ece", "grpc", "urllib3", "requests"):
     logging.getLogger(name).setLevel(logging.ERROR)
 
-# Drop “DEPRECATED FEATURE” on stdout/stderr
-class _DropDeprecated:
+# Drop "DEPRECATED FEATURE" and other noisy messages on stdout/stderr
+class _DropNoisy:
     def __init__(self, out): self._out = out
     def write(self, txt):
-        if "DEPRECATED FEATURE" not in txt:
+        skip = ("DEPRECATED FEATURE", "INFO flwr", "DEBUG flwr", "gRPC")
+        if not any(s in txt for s in skip):
             self._out.write(txt)
     def flush(self): self._out.flush()
 
-sys.stdout = _DropDeprecated(sys.stdout)
-sys.stderr = _DropDeprecated(sys.stderr)
+sys.stdout = _DropNoisy(sys.stdout)
+sys.stderr = _DropNoisy(sys.stderr)
 
 # Statistical helpers now imported from shared stats module
 
@@ -189,7 +203,7 @@ class CloudFedAvg(FedAvg):
         logger.info(f"[Cloud Server] Initialized for GLOBAL ROUND {self.current_global_round}")
 
     def _load_previous_metrics(self):
-        """Load previous round metrics from standardized metrics/cloud/rounds.csv."""
+        """Load previous round metrics from centralized_metrics.csv."""
         self.prev_central_loss = None
         self.prev_central_acc = None
         self.prev_avg_loss_across_servers = None
@@ -197,24 +211,30 @@ class CloudFedAvg(FedAvg):
         if self.current_global_round > 0:
             try:
                 import pandas as pd
-                rounds_csv = Path().resolve() / "metrics" / "cloud" / "rounds.csv"
-                if rounds_csv.exists():
-                    df = pd.read_csv(rounds_csv)
+                central_csv = metrics_dir / "centralized_metrics.csv"
+                if central_csv.exists():
+                    df = pd.read_csv(central_csv)
                     prev_round = self.current_global_round - 1
-                    prev_row = df[df['global_round'] == prev_round]
+                    prev_row = df[df['round'] == prev_round]
                     if not prev_row.empty:
-                        self.prev_central_loss = prev_row['global_test_loss_centralized'].iloc[0]
-                        self.prev_central_acc = prev_row['global_test_accuracy_centralized'].iloc[0]
-                        self.prev_avg_loss_across_servers = prev_row['avg_test_loss_across_servers'].iloc[0]
-                        self.prev_avg_acc_across_servers = prev_row['avg_test_accuracy_across_servers'].iloc[0]
+                        self.prev_central_loss = prev_row['central_test_loss'].iloc[0]
+                        self.prev_central_acc = prev_row['central_test_accuracy'].iloc[0]
                         # sanitize
                         if pd.isna(self.prev_central_loss): self.prev_central_loss = None
-                        if pd.isna(self.prev_central_acc):  self.prev_central_acc  = None
+                        if pd.isna(self.prev_central_acc):  self.prev_central_acc = None
+                # Also load distributed metrics for avg across servers
+                dist_csv = metrics_dir / "distributed_metrics.csv"
+                if dist_csv.exists():
+                    df = pd.read_csv(dist_csv)
+                    prev_round = self.current_global_round - 1
+                    prev_row = df[df['round'] == prev_round]
+                    if not prev_row.empty:
+                        self.prev_avg_loss_across_servers = prev_row['avg_loss'].iloc[0] if 'avg_loss' in prev_row else None
+                        self.prev_avg_acc_across_servers = prev_row['avg_accuracy'].iloc[0] if 'avg_accuracy' in prev_row else None
                         if pd.isna(self.prev_avg_loss_across_servers): self.prev_avg_loss_across_servers = None
-                        if pd.isna(self.prev_avg_acc_across_servers):  self.prev_avg_acc_across_servers  = None
-                        logger.info(f"[Cloud Server] Loaded previous metrics from round {prev_round}")
+                        if pd.isna(self.prev_avg_acc_across_servers):  self.prev_avg_acc_across_servers = None
             except Exception as e:
-                logger.warning(f"[Cloud Server] Could not load previous metrics: {e}")
+                pass  # Silently continue if no previous metrics
 
     def aggregate_fit(self, rnd: int, results: List[Tuple[str, FitRes]], failures: List[Any]):
         """Aggregate fit results from leaf servers."""
@@ -294,20 +314,10 @@ class CloudFedAvg(FedAvg):
         return super().configure_fit(server_round, parameters, client_manager)
 
     def aggregate_evaluate(self, rnd: int, results: List[Tuple[str, Any]], failures: List[Any]):
-        """
-        Just “print-and-forward” the evaluation metrics.  If we are on the *last* server-round *of the final global round*, create a final completion signal.
-        """
+        """Aggregate evaluation results and write metrics CSVs."""
         current_global = self.current_global_round
-        
-        for sid, eval_res in results:
-            acc = eval_res.metrics.get("accuracy", float("nan"))
-            
-        if failures:
-            for f in failures:
-                pass
-                
 
-        # Call super and unpack exactly two values
+        # Call super and unpack
         merged = super().aggregate_evaluate(rnd, results, failures)
         if merged is None:
             return None
@@ -318,141 +328,208 @@ class CloudFedAvg(FedAvg):
             metrics["accuracy"] = weighted_average(
                 [(r.num_examples, r.metrics) for _, r in results]
             )["accuracy"]
-        metrics["num_leaf_servers"] = len(results)
-        print(f"Loss: {loss:.4f}, Accuracy: {metrics['accuracy']:.4f}")
 
-        # Centralized evaluation on full HHAR test set using latest global params
+        # ══════════════════════════════════════════════════════════════════════
+        # CENTRALIZED EVALUATION on full HHAR test set
+        # ══════════════════════════════════════════════════════════════════════
         central_loss, central_acc = None, None
+        central_train_loss, central_train_acc = None, None
         try:
             if self.latest_parameters is not None:
-                # Prepare model with aggregated weights
                 model = Net()
                 nds = parameters_to_ndarrays(self.latest_parameters)
                 set_weights(model, nds)
-                # Centralized (full dataset) evaluation — inline, no partitions
                 from fedge.task import (
                     load_hhar_data, HHARDataset,
                     DATA_ROOT, USE_WATCHES, SAMPLE_RATE_HZ,
                     WINDOW_SECONDS, WINDOW_STRIDE_SECONDS,
                 )
                 from torch.utils.data import DataLoader, Subset
-                import numpy as np
 
                 X_all, y_all = load_hhar_data(
-                    data_root=DATA_ROOT,
-                    use_watches=USE_WATCHES,
-                    sample_rate_hz=SAMPLE_RATE_HZ,
-                    window_seconds=WINDOW_SECONDS,
+                    data_root=DATA_ROOT, use_watches=USE_WATCHES,
+                    sample_rate_hz=SAMPLE_RATE_HZ, window_seconds=WINDOW_SECONDS,
                     window_stride_seconds=WINDOW_STRIDE_SECONDS,
                 )
                 ds = HHARDataset(X_all, y_all, normalize=True)
                 n = len(ds)
                 n_train = int(0.8 * n)
+                train_idx = np.arange(0, n_train, dtype=np.int64)
                 test_idx = np.arange(n_train, n, dtype=np.int64)
-                testloader_global = DataLoader(Subset(ds, test_idx), batch_size=32, shuffle=False, num_workers=0)
+                trainloader = DataLoader(Subset(ds, train_idx), batch_size=32, shuffle=False, num_workers=0)
+                testloader = DataLoader(Subset(ds, test_idx), batch_size=32, shuffle=False, num_workers=0)
 
                 device = torch.device("cpu")
-                central_loss, central_acc = test(model, testloader_global, device)
-                metrics["central_loss"] = float(central_loss)
-                metrics["central_accuracy"] = float(central_acc)
+                central_train_loss, central_train_acc = test(model, trainloader, device)
+                central_loss, central_acc = test(model, testloader, device)
         except Exception as e:
-            logger.error(f"[Cloud Server] Centralized evaluation failed: {e}")
+            pass  # Continue without centralized metrics
 
-        # Compute distribution stats across servers for their evaluation results
-        server_losses = [float(ev.loss) for _, ev in results]
-        server_accs = [float(ev.metrics.get("accuracy", float("nan"))) for _, ev in results]
-        loss_mean, loss_std, loss_ci_low, loss_ci_high = _mean_std_ci(server_losses) if server_losses else (float("nan"),)*4
-        acc_mean, acc_std, acc_ci_low, acc_ci_high = _mean_std_ci(server_accs) if server_accs else (float("nan"),)*4
+        # ══════════════════════════════════════════════════════════════════════
+        # WRITE centralized_metrics.csv (matches CIFAR-10 format)
+        # ══════════════════════════════════════════════════════════════════════
+        conv_loss_rate = 0.0 if self.prev_central_loss is None or central_loss is None else (central_loss - self.prev_central_loss)
+        conv_acc_rate = 0.0 if self.prev_central_acc is None or central_acc is None else (central_acc - self.prev_central_acc)
+        central_loss_gap = (central_loss - central_train_loss) if (central_loss is not None and central_train_loss is not None) else 0.0
+        central_acc_gap = (central_train_acc - central_acc) if (central_train_acc is not None and central_acc is not None) else 0.0
 
-        # Generalization gap (centralized vs avg across servers)
-        gen_gap_acc_central_minus_servers = None if (central_acc is None or math.isnan(acc_mean)) else (central_acc - acc_mean)
-        gen_gap_loss_central_minus_servers = None if (central_loss is None or math.isnan(loss_mean)) else (central_loss - loss_mean)
-
-        # Convergence metrics (delta from previous round)
-        delta_central_loss = None if (self.prev_central_loss is None or central_loss is None) else (central_loss - self.prev_central_loss)
-        delta_central_acc = None if (self.prev_central_acc is None or central_acc is None) else (central_acc - self.prev_central_acc)
-        delta_avg_loss_across_servers = (
-            None if (self.prev_avg_loss_across_servers is None or math.isnan(loss_mean))
-            else (loss_mean - self.prev_avg_loss_across_servers)
-        )
-        delta_avg_acc_across_servers = (
-            None if (self.prev_avg_acc_across_servers is None or math.isnan(acc_mean))
-            else (acc_mean - self.prev_avg_acc_across_servers)
-        )
-        
-
-        # Update previous values for next round
-        self.prev_central_loss = central_loss
-        self.prev_central_acc = central_acc
-        self.prev_avg_loss_across_servers = loss_mean if not math.isnan(loss_mean) else None
-        self.prev_avg_acc_across_servers = acc_mean if not math.isnan(acc_mean) else None
-
-        # Write standardized cloud metrics to metrics/cloud/rounds.csv
-        cloud_dir = Path().resolve() / "metrics" / "cloud"
-        cloud_dir.mkdir(parents=True, exist_ok=True)
-        rounds_csv = cloud_dir / "rounds.csv"
-        write_header = not rounds_csv.exists()
-        with open(rounds_csv, "a", newline="") as gf:
-            writer = csv.DictWriter(gf, fieldnames=[
-                "global_round",
-                "avg_test_loss_across_servers","std_test_loss_across_servers","ci95_low_test_loss_across_servers","ci95_high_test_loss_across_servers",
-                "avg_test_accuracy_across_servers","std_test_accuracy_across_servers","ci95_low_test_accuracy_across_servers","ci95_high_test_accuracy_across_servers",
-                "global_test_loss_centralized","global_test_accuracy_centralized",
-                "gen_gap_loss_central_minus_servers","gen_gap_accuracy_central_minus_servers",
-                "delta_global_loss_centralized","delta_global_accuracy_centralized",
-                "delta_avg_loss_across_servers","delta_avg_accuracy_across_servers",
-                "bytes_up_total","bytes_down_total",
+        central_csv = metrics_dir / "centralized_metrics.csv"
+        write_header = not central_csv.exists()
+        with open(central_csv, "a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=[
+                "round", "central_train_loss", "central_train_accuracy",
+                "central_test_loss", "central_test_accuracy",
+                "central_loss_gap", "central_accuracy_gap",
+                "conv_loss_rate", "conv_acc_rate", "conv_loss_stability", "conv_acc_stability",
             ])
             if write_header:
                 writer.writeheader()
             writer.writerow({
-                "global_round": current_global,
-                "avg_test_loss_across_servers": float(loss),
-                "std_test_loss_across_servers": loss_std,
-                "ci95_low_test_loss_across_servers": loss_ci_low,
-                "ci95_high_test_loss_across_servers": loss_ci_high,
-                "avg_test_accuracy_across_servers": float(metrics["accuracy"]),
-                "std_test_accuracy_across_servers": acc_std,
-                "ci95_low_test_accuracy_across_servers": acc_ci_low,
-                "ci95_high_test_accuracy_across_servers": acc_ci_high,
-                "global_test_loss_centralized": None if central_loss is None else float(central_loss),
-                "global_test_accuracy_centralized": None if central_acc is None else float(central_acc),
-                "gen_gap_loss_central_minus_servers": gen_gap_loss_central_minus_servers,
-                "gen_gap_accuracy_central_minus_servers": gen_gap_acc_central_minus_servers,
-                "delta_global_loss_centralized": delta_central_loss,
-                "delta_global_accuracy_centralized": delta_central_acc,
-                "delta_avg_loss_across_servers": delta_avg_loss_across_servers,
-                "delta_avg_accuracy_across_servers": delta_avg_acc_across_servers,
-                "bytes_up_total": 0,
-                "bytes_down_total": 0,
+                "round": current_global,
+                "central_train_loss": central_train_loss if central_train_loss else 0.0,
+                "central_train_accuracy": central_train_acc if central_train_acc else 0.0,
+                "central_test_loss": central_loss if central_loss else 0.0,
+                "central_test_accuracy": central_acc if central_acc else 0.0,
+                "central_loss_gap": central_loss_gap,
+                "central_accuracy_gap": central_acc_gap,
+                "conv_loss_rate": conv_loss_rate,
+                "conv_acc_rate": conv_acc_rate,
+                "conv_loss_stability": 0.0,
+                "conv_acc_stability": 0.0,
             })
 
-        # Write cloud communication CSV
-        self._write_cloud_comm_csv()
-        
-        # Final completion signals only on the very last leaf-round of the overall training
+        # Update previous values
+        self.prev_central_loss = central_loss
+        self.prev_central_acc = central_acc
+
+        # ══════════════════════════════════════════════════════════════════════
+        # READ leaf server CSVs and WRITE distributed_metrics.csv + servers_metrics.csv
+        # ══════════════════════════════════════════════════════════════════════
+        self._write_distributed_and_servers_csv(current_global)
+
+        # Print concise round summary
+        central_str = f", Central: {central_acc:.4f}" if central_acc else ""
+        print(f"Round {current_global}: Loss={loss:.4f}, Acc={metrics['accuracy']:.4f}{central_str}")
+
+        # Final completion signals
         is_last_global_round = current_global == GLOBAL_ROUNDS - 1
         is_last_server_round = rnd == SERVER_ROUNDS_PER_GLOBAL
         if is_last_global_round and is_last_server_round:
-            create_signal_file(complete_signal, "Created completion signal after final aggregate_evaluate")
+            create_signal_file(complete_signal, "Training complete")
 
         return loss, metrics
-    
-    def _write_cloud_comm_csv(self):
-        """Write cloud communication metrics to CSV."""
-        if not self.communication_metrics:
-            return
-        
-        try:
-            import pandas as pd
-            df = pd.DataFrame(self.communication_metrics)
-            out_path = Path(os.getenv("RUN_DIR", ".")) / "cloud_comm.csv"
-            
-            mode = "a" if out_path.exists() else "w"
-            df.to_csv(out_path, index=False, mode=mode, header=not out_path.exists())
-            logger.info(f"[Cloud Server] Wrote communication CSV → {out_path}")
-        except Exception as e:
-            logger.warning(f"[Cloud Server] Could not write comm CSV: {e}")
+
+    def _write_distributed_and_servers_csv(self, round_num: int):
+        """
+        Read metrics from leaf server CSVs and write:
+        - distributed_metrics.csv (aggregated stats)
+        - servers_metrics.csv (per-server breakdown)
+        """
+        all_acc, all_loss, all_weights = [], [], []
+        comp_times, up_bytes, down_bytes = [], [], []
+        per_server_data: Dict[int, Dict[str, Any]] = {}
+
+        for sid in range(NUM_SERVERS):
+            base_dir = fs.leaf_server_dir(project_root, sid)
+            server_accs, server_losses = [], []
+            server_comp, server_upb, server_dnb = [], [], []
+
+            # Read clients.csv from each server
+            clients_csv = base_dir / "metrics" / "clients.csv"
+            if clients_csv.exists():
+                try:
+                    with open(clients_csv, "r", encoding="utf-8") as f:
+                        reader = csv.DictReader(f)
+                        rows = [r for r in reader if int(r.get("global_round", -1)) == round_num]
+                    for r in rows:
+                        acc = float(r.get("test_accuracy", 0.0) or 0.0)
+                        loss_val = float(r.get("test_loss", 0.0) or 0.0)
+                        n = int(r.get("num_examples", 1) or 1)
+
+                        all_acc.append(acc)
+                        all_loss.append(loss_val)
+                        all_weights.append(n)
+                        server_accs.append(acc)
+                        server_losses.append(loss_val)
+
+                        comp = float(r.get("comp_time_sec", 0.0) or 0.0)
+                        up = float(r.get("upload_bytes", 0) or 0)
+                        dn = float(r.get("download_bytes", 0) or 0)
+                        comp_times.append(comp)
+                        up_bytes.append(up)
+                        down_bytes.append(dn)
+                        server_comp.append(comp)
+                        server_upb.append(up)
+                        server_dnb.append(dn)
+                except Exception:
+                    pass
+
+            per_server_data[sid] = {
+                "accs": server_accs, "losses": server_losses,
+                "comp": server_comp, "upb": server_upb, "dnb": server_dnb,
+            }
+
+        # Compute statistics using t-distribution CI
+        n_total = sum(all_weights) if all_weights else 1
+        avg_acc = float(sum(w * a for w, a in zip(all_weights, all_acc)) / max(1, n_total)) if all_weights else 0.0
+        avg_loss = float(sum(w * l for w, l in zip(all_weights, all_loss)) / max(1, n_total)) if all_weights else 0.0
+        _, acc_sd, acc_ci_lo, acc_ci_hi = _mean_std_ci(all_acc) if all_acc else (0.0, 0.0, 0.0, 0.0)
+        _, loss_sd, loss_ci_lo, loss_ci_hi = _mean_std_ci(all_loss) if all_loss else (0.0, 0.0, 0.0, 0.0)
+
+        # Build distributed record (aggregated only, no per-client breakdown)
+        distributed = {
+            "avg_accuracy": avg_acc, "avg_loss": avg_loss,
+            "accuracy_std": acc_sd, "loss_std": loss_sd,
+            "acc_ci95_lo": float(acc_ci_lo), "acc_ci95_hi": float(acc_ci_hi),
+            "loss_ci95_lo": float(loss_ci_lo), "loss_ci95_hi": float(loss_ci_hi),
+            "avg_comp_time_sec": float(np.mean(comp_times)) if comp_times else 0.0,
+            "total_comp_time_sec": float(np.sum(comp_times)) if comp_times else 0.0,
+            "avg_upload_MB": (float(np.mean(up_bytes)) / 1e6) if up_bytes else 0.0,
+            "total_upload_MB": (float(np.sum(up_bytes)) / 1e6) if up_bytes else 0.0,
+            "avg_download_MB": (float(np.mean(down_bytes)) / 1e6) if down_bytes else 0.0,
+            "total_download_MB": (float(np.sum(down_bytes)) / 1e6) if down_bytes else 0.0,
+        }
+
+        # Write distributed_metrics.csv
+        dist_path = metrics_dir / "distributed_metrics.csv"
+        write_header = not dist_path.exists()
+        with open(dist_path, "a", newline="") as f:
+            fieldnames = ["round"] + list(distributed.keys())
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            if write_header:
+                writer.writeheader()
+            writer.writerow({"round": round_num, **distributed})
+
+        # Write servers_metrics.csv (per-server breakdown)
+        servers_path = metrics_dir / "servers_metrics.csv"
+        srv_write_header = not servers_path.exists()
+        srv_fieldnames = ["round"]
+        for sid in range(NUM_SERVERS):
+            srv_fieldnames.extend([
+                f"server{sid}_avg_accuracy", f"server{sid}_avg_loss",
+                f"server{sid}_client_count", f"server{sid}_avg_comp_time_sec",
+                f"server{sid}_avg_upload_MB", f"server{sid}_avg_download_MB",
+            ])
+        srv_row = {"round": round_num}
+        for sid in range(NUM_SERVERS):
+            d = per_server_data.get(sid, {})
+            accs = d.get("accs", [])
+            losses = d.get("losses", [])
+            comps = d.get("comp", [])
+            upb = d.get("upb", [])
+            dnb = d.get("dnb", [])
+            srv_row[f"server{sid}_avg_accuracy"] = float(np.mean(accs)) if accs else 0.0
+            srv_row[f"server{sid}_avg_loss"] = float(np.mean(losses)) if losses else 0.0
+            srv_row[f"server{sid}_client_count"] = len(accs)
+            srv_row[f"server{sid}_avg_comp_time_sec"] = float(np.mean(comps)) if comps else 0.0
+            srv_row[f"server{sid}_avg_upload_MB"] = (float(np.mean(upb)) / 1e6) if upb else 0.0
+            srv_row[f"server{sid}_avg_download_MB"] = (float(np.mean(dnb)) / 1e6) if dnb else 0.0
+
+        with open(servers_path, "a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=srv_fieldnames)
+            if srv_write_header:
+                writer.writeheader()
+            writer.writerow(srv_row)
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  MAIN: spin up the FedAvg server for exactly GLOBAL_ROUNDS * SERVER_ROUNDS_PER_GLOBAL
